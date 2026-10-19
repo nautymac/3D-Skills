@@ -1,6 +1,6 @@
 ---
 name: leiasr-integration
-description: Integrate the LeiaSR autostereoscopic display weaver (Simulated Reality SDK) into a game or renderer that already produces a side-by-side stereo image. Covers the SR runtime contract (SbS-packed input texture, weaver hand-off, init ordering), shipping a binary that runs on machines without the SR runtime installed (delay-load + SEH preflight + LoadLibraryW gate), upscaling from a low render resolution to the SR panel's native resolution via the weaver, OS window-handle plumbing (SDL / GLFW / Win32), per-monitor-DPI-awareness (the weave must land 1:1 on physical panel pixels — on a >100%-scaled display a non-DPI-aware host gets its window/weave virtualized and stretched, collapsing the 3D; set it before window creation, plus the SR-service one-shot-resize correction), vendoring the SDK itself as a git submodule (bo3b/SR-lib, api_expansion branch — a public repo) whose CMake package (SRLib::SDK / SRLib::SR / srlib_apply_delayload) replaces the hand-rolled SDK paths and delay-load list, its SRInterfaceDX9/DX11/DX12/OGL wrapper plus switchable-lens-hint and polled head/eye tracking, its nested per-architecture layout, and the CI credential plumbing (read-access PAT + global insteadOf rewrite) needed only if you mirror it into a private repo of your own, the switchable lenticular lens as global display state you must hand back when you stop weaving, and graceful fallback to plain Side-by-Side when SR isn't available. Also covers diagnosing the failure mode where output is flat mono while every SDK call reports success, and why the weaver's automatic anti-crosstalk still leaves visible ghosting on high-contrast game content (its correction clips against the ends of the range), why the SDK's own setContrast fix is unreachable on the modern IDX*Weaver1 interfaces, and the sRGB-vs-linear space rule that decides whether the compose-shader fix helps or hurts - the fix itself lives in the output3d skill. Backend-neutral entry points are stable; per-backend sections exist for OpenGL, DirectX 12 and DirectX 11 — Vulkan / etc. can be added alongside them.
+description: Integrate the LeiaSR autostereoscopic display weaver (Simulated Reality SDK) into a game or renderer that already produces a side-by-side stereo image. Covers the SR runtime contract (SbS-packed input texture, weaver hand-off, init ordering), shipping a binary that runs on machines without the SR runtime installed (delay-load + SEH preflight + LoadLibraryW gate), upscaling from a low render resolution to the SR panel's native resolution via the weaver, OS window-handle plumbing (SDL / GLFW / Win32), per-monitor-DPI-awareness (the weave must land 1:1 on physical panel pixels — on a >100%-scaled display a non-DPI-aware host gets its window/weave virtualized and stretched, collapsing the 3D; set it before window creation, plus the SR-service one-shot-resize correction), vendoring the SDK itself as a git submodule (bo3b/SR-lib, api_expansion branch — a public repo) whose CMake package (SRLib::SDK / SRLib::SR / srlib_apply_delayload) replaces the hand-rolled SDK paths and delay-load list, its SRInterfaceDX9/DX11/DX12/OGL wrapper plus switchable-lens-hint and polled head/eye tracking, its nested per-architecture layout, and the CI credential plumbing (read-access PAT + global insteadOf rewrite) needed only if you mirror it into a private repo of your own, the switchable lenticular lens as global display state you must hand back when you stop weaving, and graceful fallback to plain Side-by-Side when SR isn't available. Also covers diagnosing the failure mode where output is flat mono while every SDK call reports success, and ghost reduction in two layers: tuning the weaver's OWN anti-crosstalk (mode Off/Static/Dynamic, strength as a multiple of the panel's measured factors, and the weaving contrast) — absent from the IDX*Weaver1 interfaces but reachable through the runtime's IWeaverSettings1 via query<>(), which SR-lib's SR.hpp wraps as SetCrosstalk() plus raw-SDK helpers, with tested starting values and the ABI caveat of a hand-declared interface — and why the weaver's cancellation still leaves visible ghosting on high-contrast game content (its correction clips against the ends of the range), plus the sRGB-vs-linear space rule that decides whether the compose-shader fix helps or hurts (and why setShaderSRGBConversion(false,false) on the display-encoded UNORM content almost every game produces silently under-cancels and makes the anti-crosstalk Strength control look inert, with no colour symptom) - that shader fix itself lives in the output3d skill. Backend-neutral entry points are stable; per-backend sections exist for OpenGL, DirectX 12 and DirectX 11 — Vulkan / etc. can be added alongside them.
 ---
 
 # LeiaSR autostereoscopic display integration
@@ -103,6 +103,8 @@ do. Available now:
 | Delay-load probing | Core **and** the backend weaver DLL, per backend, before any SDK call (A.3.2) |
 | `SetShaderSRGBConversion` / `SetLatencyInFrames` / `SetLatency` / `EnableLateLatching` | On every interface |
 | `GetPredictedEyePositions` | The weaver's own prediction — no tracker, no listener, no opt-in |
+| `SetCrosstalk(mode, strength, contrast)` | The weaver's own anti-crosstalk, on every interface — see A.11.1. Returns `false` when there is no weaver yet or the runtime doesn't offer the settings interface |
+| `SRQueryWeaverSettings` / `SRReadCrosstalkDefaults` / `SRApplyCrosstalk` | The same controls for code that creates its SDK weaver **directly** (no `SRInterfaceXxx`). Header-only, in a section of `SR.hpp` compiled only where the SDK headers are on the include path (`__has_include`), so wrapper-only consumers still need no SR SDK. `SRLib::SDK` exports SR-lib's root for this |
 | `SREnableLensHint` / `SRDisableLensHint` / `SRIsLensHintEnabled` | Switchable-lens panels — see A.10. Safe to call every frame: an unchanged preference never reaches the SDK, and a fixed-lens panel costs one failed create, not one per frame. Returns `S_OK` = changed, `S_FALSE` = already there, `E_NOINTERFACE` = no context / no lens |
 | `SRRequestTracking` + `SRGetHead` / `SRGetHeadPose` / `SRGetEyePair` | Polled head/eye tracking; the SDK's listener+stream+mutex boilerplate is done for you |
 
@@ -123,7 +125,11 @@ Two things to know before reaching for them:
   lifecycle, the DLL probing and the **switchable lens hint** are exercised on
   real hardware (rt64-3D / Goemon64Recomp3D; lens verified 2026-08-10 on a
   switchable-lens panel via UU3D). The DX11 path is wired and building against
-  a real integration (UU3D) but its weave is **not yet confirmed on a panel**. All tracking,
+  a real integration (UU3D) but its weave is **not yet confirmed on a panel**. The
+  **anti-crosstalk raw-SDK helpers** are exercised on real hardware ([VRto3D](https://github.com/oneup03/VRto3D)'s
+  raw `IDX11Weaver1`, 2026-10-11), and so are the `SRInterfaceXxx::SetCrosstalk`
+  wrappers: `SRInterfaceDX12` in [dusklight3D](https://github.com/oneup03/dusklight3D) (2026-10-19, once its sRGB flag was
+  fixed; see pitfall #16) and [UU3D](https://github.com/oneup03/UU3D)'s DX11/DX12 compositors. All tracking,
   the DX9/OGL knobs and the 32-bit build compile and link but have **not** been
   run. Treat those as untested code you're the first to exercise.
 
@@ -832,6 +838,8 @@ After binding the default framebuffer, the viewport should be the full SDL windo
 
 15. **DPI awareness declared too late (SDL hosts especially).** Process DPI awareness is **one-shot** — the first declaration wins and later calls silently fail. SDL declares it during `SDL_VideoInit`/`SDL_Init(SDL_INIT_VIDEO)`, so a host that calls `SetProcessDpiAwarenessContext` *after* that gets a no-op and quietly runs at whatever SDL chose. Declare it **before** SDL touches video, also set `SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2")` so SDL doesn't claim something weaker first, and **read it back** (`GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext())`) and log per-monitor / system / unaware — otherwise you cannot tell whether A.2.2 actually took effect.
 
+16. **`setShaderSRGBConversion(false, false)` on display-encoded content.** This is the default trap for any engine whose swap chain is plain `*_UNORM`, which describes almost all of them, because "UNORM" reads as "linear". Colours look completely normal either way, since the read and write conversions mirror each other. Ghosting is just worse than it should be, and the anti-crosstalk Strength control (A.11.1) seems to do nothing, because the weaver's linear-light cancellation is being applied to encoded values. Use `(true, true)` unless your pipeline really holds linear values (B.2 gamma note). Flip your compose shader's ghost-reduction space at the same time (A.11.2).
+
 ## A.10 The switchable lens is global state — hand it back
 
 Some SR panels have a switchable lenticular layer: lens off is an ordinary
@@ -867,21 +875,140 @@ cheapest proof that your context lifetime is behaving. If you see the lens
 enabled and never released across a mode switch, your release path isn't
 running.
 
-## A.11 Ghost reduction — expect it, and fix it in your compose shader
+## A.11 Ghost reduction — tune the weaver's cancellation, then fix the clipping in your shader
 
 The weaver applies anti-crosstalk for you, using factors measured for the
-specific panel. You do not enable it and you cannot tune it: `setACTMode`,
-`setCrosstalkStaticFactor` and `setContrast` exist only on the deprecated
-`DX9/10/11/12WeaverBase` classes, never on the `IDX*Weaver1` interfaces that
-`SR::Create*Weaver` returns. Verified identical in SDK 1.34.10 and 1.36.2, so a
-newer SDK does not help, and the internal `IWeaverSettings1` in the DLL's RTTI
-ships no header — do not hand-reconstruct that vtable in shipping software.
+specific panel, and you never have to enable it. Ghost reduction has two layers,
+and you want both:
 
-**So residual ghosting on game content is expected, and it is not a sign the
+1. **The weaver's own cancellation** — how hard the panel pre-subtracts the
+   opposite view. Tunable, though not where you'd look (A.11.1).
+2. **The clipping that cancellation causes** — fixed in your compose shader
+   (A.11.2, technique in `output3d` §3.4).
+
+### A.11.1 Tuning the weaver's own anti-crosstalk
+
+`setACTMode`, `setCrosstalkStaticFactor/DynamicFactor` and `setContrast` exist
+only on the deprecated `DX9/10/11/12WeaverBase` classes, never on the
+`IDX*Weaver1` interfaces that `SR::Create*Weaver` returns — identical in SDK
+1.34.10 and 1.36.2, so a newer SDK doesn't add them. **But the runtime still
+implements them**, behind a weaver settings interface that every weaver hands
+out through `IQueryInterface::query<>()` (all five `I*Weaver1` interfaces derive
+from `IQueryInterface`):
+
+```cpp
+SR::IWeaverSettings1* s = weaver->query<SR::IWeaverSettings1>();   // nullptr if not offered
+```
+
+No SDK version ships the declaration (it lived in an `sr/weaver/IWeaverSettings.h`
+that neither 1.34.10 as vendored nor 1.36.2 contains), so it is declared by
+hand. **SR-lib's `SR.hpp` already does this** — use it rather than writing your
+own:
+
+- Through `SRInterfaceXxx`: `SetCrosstalk(SRCrosstalkMode mode, float strength, float contrast = 1.0f)`.
+- With a raw SDK weaver: `SRQueryWeaverSettings(weaver)` →
+  `SRReadCrosstalkDefaults(settings, defaults)` once per weaver →
+  `SRApplyCrosstalk(settings, defaults, mode, strength, contrast)`.
+
+Prior art: SR Loom (effcol/SR-Loom, v3.1, `SRWeaver.cpp`) drives these on its
+standard DX11/DX12 weavers against the 1.36.2 SDK; [VRto3D](https://github.com/oneup03/VRto3D) does it through the
+SR-lib helpers on its raw `IDX11Weaver1`, verified on a panel 2026-10-11.
+
+**The ABI caveat — know what you're shipping.** `query<>()` looks the interface
+up in the runtime by `typeid` (MSVC matches the decorated name across DLLs), and
+every call goes through the *runtime's* vtable. So the namespace (`SR`), class
+name (`IWeaverSettings1`), the `virtual IQueryInterface` base and the method
+**order** must match exactly:
+
+```cpp
+namespace SR {
+class IWeaverSettings1 : virtual IQueryInterface {
+protected:
+    IWeaverSettings1() = default;
+    virtual ~IWeaverSettings1() = default;
+public:
+    virtual void setContrast(float contrast) = 0;
+    virtual float getContrast() const = 0;
+    virtual void setACTMode(WeaverACTMode mode) = 0;      // global enum, WeaverTypes.h
+    virtual WeaverACTMode getACTMode() const = 0;
+    virtual void setCrosstalkStaticFactor(float factor) = 0;
+    virtual float getCrosstalkStaticFactor() const = 0;
+    virtual void setCrosstalkDynamicFactor(float factor) = 0;
+    virtual float getCrosstalkDynamicFactor() const = 0;
+};
+}
+```
+
+A runtime that doesn't know the name returns `nullptr` — handle it by hiding the
+controls. A future runtime that knew the name but reordered methods would call
+the wrong one, and no `try`/`catch` catches that. It is a deliberate, observable
+risk (log the defaults you read; garbage there is the tell), not a reason to go
+without the controls.
+
+**How to drive them:**
+
+- **Settings belong to one weaver.** A re-created weaver starts from the panel's
+  defaults again, so re-read defaults and re-apply after every `Create*Weaver`.
+  Setting them on a throwaway helper weaver does nothing to your real one.
+- **Read the panel's defaults before changing anything**, and express strength
+  and contrast as multiples of them — `1.0` is then "the display as shipped" and
+  `(Default, 1.0, 1.0)` restores it exactly. Panel observed 2026-10-11: mode
+  `Dynamic` (2), static factor `0.0128535`, dynamic factor `0`, contrast `1.0`.
+  Note the dynamic factor reads `0` while Dynamic is the active mode, yet scaling
+  strength still visibly changes ghosting — scale **both** factors rather than
+  guessing which one the mode consumes. (Reconfirmed in Dynamic mode on DX12 by
+  [dusklight3D](https://github.com/oneup03/dusklight3D), 2026-10-19. The zero dynamic factor is **not** why a strength
+  control looks dead. That theory cost a debugging round, so don't chase it.
+  See the next point.)
+- **If Strength appears to do nothing, check `setShaderSRGBConversion`'s
+  `read` flag first.** The calls are accepted and logged, but nothing changes on
+  the panel. The cause is weaving display-encoded values with `read = false`
+  (B.2 gamma note). The cancellation subtracts a linear-light fraction, about
+  1.3% of the opposite view, and applying it to encoded values barely moves
+  dark tones:
+
+  | 0.20-encoded pixel beside a bright one | `read = true` (linear) | `read = false` on encoded data |
+  |---|---|---|
+  | strength 1.0× | → ~0.15 | → ~0.19 |
+  | strength 3.0× | → 0.00 (clips) | → ~0.16 |
+
+  The tell is comparing integrations: on the same panel, through the same SR-lib
+  commit, [VRto3D](https://github.com/oneup03/VRto3D) and [UU3D](https://github.com/oneup03/UU3D) responded and dusklight3D didn't. Their call order
+  and timing were identical. The only difference was this flag.
+- **Ask for the interface again on every call** instead of caching the pointer —
+  `query<>` is cheap, and a weaver destroyed and re-created at the same address
+  would otherwise leave you a dangling pointer. Cache only the defaults.
+- **Apply on the render thread, only when a value changes** (just before
+  `weave()` is a good spot), and log each change — that log is the proof the
+  runtime accepted it.
+- **Keep them independent of any compose-shader on/off toggle.** These are the
+  display's settings, not part of your shader pass. Gating them on the shader
+  toggle (pushing the panel defaults while it's off) made the controls silently
+  inert while the box was unchecked — confusing, and it was reverted.
+- **Persist them per profile like any other setting**; clamp hand-edited values
+  to the UI's ranges before applying.
+
+**What each control does, and where to start** (tested values, 2026-10-11):
+
+| Control | Range worth exposing | Start at | Effect |
+|---|---|---|---|
+| Mode | Display Default / Off / Static / Dynamic | Display Default | Dynamic follows the tracked eye position; Static is a fixed correction; Default is the panel's own choice (Dynamic on current panels) |
+| Strength | `0..3×` the panel's factors | **1.30** | Higher cancels more ghosting but clips more in dark areas — pair it with black lift (A.11.2) |
+| Weaving contrast | **`0.5..1.0`** | **0.97** | Behaves almost exactly like the compose-shader contrast squeeze. Above `1.0` is not useful |
+
+For the compose-shader levers on top of those, a contrast squeeze of **0.95**
+was a good start (tighter than `output3d`'s generic `0.90`, because the weaver's
+own contrast is already doing part of the work), plus a small black lift.
+
+### A.11.2 The clipping that's left — fix it in your compose shader
+
+**Residual ghosting on game content is expected, and it is not a sign the
 correction is missing.** Cancellation pre-subtracts part of the opposite view,
 which pushes values past the ends of the range where your render target clamps
 them; the clamped part is what you still see. Desktop and photo content rarely
 reaches that. A bright HUD or subtitles over a dark scene reaches it constantly.
+Raising the weaver's strength (A.11.1) makes it reach it *more*, which is why
+the two layers go together.
 
 **The fix belongs in your compose shader, not here** — see **`output3d` §3.4**,
 which owns the technique in full: the two range-compression levers (contrast
@@ -905,6 +1032,17 @@ Match the plain `pow(2.2)`, **not** the piecewise sRGB curve — being more
 "correct" than the runtime just desynchronises the two. A linear `0.5` pivot is
 bright (~`0.73` sRGB-encoded), so lowering contrast lifts blacks noticeably; that
 is expected, not a bug.
+
+**When one compose shader serves every output mode**, scope the linear wrap to
+the pass that feeds the weaver rather than switching the whole shader. Flipping
+`read` to `true` has to bring the shader along with it, but other modes (SbS,
+anaglyph, interlaced) have sliders users already calibrated in encoded space.
+[dusklight3D](https://github.com/oneup03/dusklight3D) (2026-10-19, via [aurora3D `lib/webgpu/leiasr.cpp`](https://github.com/oneup03/aurora3D/blob/Stereo3D-rebased/lib/webgpu/leiasr.cpp) and its compose shader in
+`lib/webgpu/gpu.cpp`) repurposed a padding slot in its stereo UBO as a
+`ghostLinear` flag, set only for the LeiaSR SbS pass. Every other mode stays
+bit-identical. Also expect **Black Lift to be far stronger in linear**: 1% of
+linear is ~`0.12` encoded and 2% is ~`0.17`, so a slider whose help text says
+"2–5%" for encoded displays should tell LeiaSR users that 1–2% is plenty.
 
 Finally: **the slider looking better does not prove the panel's cancellation is
 what improved.** Reducing contrast reduces ghost visibility on its own, so "it
@@ -931,9 +1069,11 @@ backwards from it to conclusions about the runtime's internals.
 
 8. **When it's mono but nothing is wrong: prove the weave, don't guess.** `weave()` returning cleanly proves nothing — the runtime degrades to a flat left-eye view rather than failing. Log, once per weaver creation: backbuffer vs window-client vs panel dimensions (all three must match, or the present-time rescale destroys the per-physical-pixel lenticular pattern); `GetPredictedEyePositions` across successive reports (values that never move = nothing is being tracked); and `Dimenco::Weaver::GetBehaviorWhenNotTracking()` (`ShowLeft` / `ShowLeftWithShader` = the runtime is *deliberately* showing you one eye). If all three look healthy and it's still mono, see pitfall #14 — restart Windows.
 
-9. **Ghost-reduction sanity** (A.11, technique in `output3d` §3.4). Find high-contrast content — white subtitles or a bright HUD over a dark scene — and try each lever alone. Black lift is the one aimed at what actually clips here, so on a cancelling panel expect it to reach a given ghost reduction at less visible cost than the contrast squeeze; if it does nothing while contrast still helps, the ghosting is not clipping-driven on that panel and contrast is working purely by shrinking the inter-eye difference. Confirm the no-op defaults (`1.00` / `0.00`) are bit-exact, that both are skipped under HDR, and that a 3D screenshot taken with them active is captured without them.
+9. **Weaver anti-crosstalk controls** (A.11.1). On creating the weaver, log whether `query<SR::IWeaverSettings1>()` returned non-null and, if so, the defaults you read (mode, static/dynamic factor, contrast) — sane small factors and contrast `1.0` are the sign the hand-declared interface lines up with the runtime. Change mode and strength and confirm both a logged apply and a visible change on high-contrast content. Sweep strength 100% → 300% in Display Default and watch dark tones beside bright edges: they must visibly change. A logged apply with no visible change means `read` is wrong (pitfall #16), not that the controls are broken. Then re-create the weaver (mode switch) and confirm the settings are re-applied to the new one. On a runtime that returns `nullptr`, the controls must be hidden and nothing else affected.
 
-10. **Scaled-display DPI test.** Set the SR panel (or whichever monitor the window occupies) to >100% Windows display scale — e.g. 150% — and launch. The weave must still land 1:1 on panel pixels: clean autostereo, no DPI-factor zoom/crop, no blur. If the image looks zoomed by exactly the scale factor, the process isn't per-monitor-DPI-aware (A.2.2) and/or the SR service's one-shot resize wasn't corrected (pitfall #11). Log the runtime awareness readback and confirm it says per-monitor.
+10. **Ghost-reduction sanity** (A.11.2, technique in `output3d` §3.4). Find high-contrast content — white subtitles or a bright HUD over a dark scene — and try each lever alone. Black lift is the one aimed at what actually clips here, so on a cancelling panel expect it to reach a given ghost reduction at less visible cost than the contrast squeeze; if it does nothing while contrast still helps, the ghosting is not clipping-driven on that panel and contrast is working purely by shrinking the inter-eye difference. Confirm the no-op defaults (`1.00` / `0.00`) are bit-exact, that both are skipped under HDR, and that a 3D screenshot taken with them active is captured without them.
+
+11. **Scaled-display DPI test.** Set the SR panel (or whichever monitor the window occupies) to >100% Windows display scale — e.g. 150% — and launch. The weave must still land 1:1 on panel pixels: clean autostereo, no DPI-factor zoom/crop, no blur. If the image looks zoomed by exactly the scale factor, the process isn't per-monitor-DPI-aware (A.2.2) and/or the SR service's one-shot resize wasn't corrected (pitfall #11). Log the runtime awareness readback and confirm it says per-monitor.
 
 ---
 
@@ -1328,7 +1468,7 @@ The shim build is fast (~3 s incremental on a warm tree). For most edits to the 
 | Filter setting for upscale | sampler filter is internal to the weaver; nothing to set on the input texture descriptor |
 | Weaver destruction | `weaver->destroy()` (IDestroyable pattern). **Don't** `delete weaver` — that's the older deprecated `PredictingDX12Weaver` convention and asserts in debug for `IDX12Weaver1`. |
 | Delay-load DLL list | the A.3.1 list with `srDirectX.dll` substituted for `SimulatedRealityOpenGL.dll` |
-| Gamma | call `weaver->setShaderSRGBConversion(false, false)` after creation if your SBS intermediate and swap chain both hold **linear UNORM** values (e.g. you've already done sRGB-encode in the compose shader, or you're using `*_SRGB` views). Letting the weaver default to "apply gamma in + out" double-applies and produces over-saturated output. Shipping integrations disagree here — rt64-3D/BanjoRecomp3D uses `(false, false)`, UU3D uses `(true, true)` — so treat it as something to test on your own formats rather than a fixed rule. |
+| Gamma | `setShaderSRGBConversion(read, write)` — decide by what the texture's values **mean**, never by its format's name. Almost every game writes display-encoded (gamma-space) values into a plain `*_UNORM` texture, so the right call is **`(true, true)`**: linearize on read, re-encode on write. `(false, false)` is only right if the values are genuinely linear light. Getting this wrong has **no visible colour symptom** (the round trip is symmetric), only a silent one: the weaver's crosstalk cancellation is calibrated in linear light, so on encoded values it under-cancels in exactly the dark tones where ghosts show, and the anti-crosstalk Strength control looks inert (A.11.1, pitfall #16). Verified 2026-10-19: [dusklight3D](https://github.com/oneup03/dusklight3D) ([aurora3D `lib/webgpu/leiasr.cpp`](https://github.com/oneup03/aurora3D/blob/Stereo3D-rebased/lib/webgpu/leiasr.cpp)) ran `(false, false)` on encoded UNORM content and strength did nothing; `(true, true)` fixed it, matching [VRto3D](https://github.com/oneup03/VRto3D) and [UU3D](https://github.com/oneup03/UU3D), which were already correct. [rt64-3D](https://github.com/oneup03/rt64-3D)/BanjoRecomp3D also uses `(false, false)` on what is probably encoded content, so it most likely under-cancels the same way. That is unverified there. |
 
 ### B.2.1 Per-frame weave sequence
 
@@ -1477,7 +1617,7 @@ then bind + `Weave()` each frame.
 // once
 HRESULT hr = SimulatedReality::CreateSRInterfaceDX11(ctx, hwnd, &sr);
 if (FAILED(hr) || sr == nullptr) { /* log, fall back to SbS */ }
-sr->SetShaderSRGBConversion(true, true);   // test against YOUR formats (B.2 gamma note)
+sr->SetShaderSRGBConversion(true, true);   // for display-encoded content; see the B.2 gamma note
 
 // on SbS (re)creation only — see A.5
 sr->SetInputTexture(sbs_srv);              // full 2W x H
