@@ -1644,6 +1644,8 @@ Differences from DX12 worth knowing:
 
 *(Same template as B.2 — list weaver type, create function, header, link target, texture handle, output destination, filter requirements, and any delay-load DLLs unique to that backend. The shared concerns in Part A don't change.)*
 
+**Vulkan producers, until this section is filled in.** If the stereo pair comes from a Vulkan renderer (often as a 2-layer image from `VK_KHR_multiview` — see `vulkan-multiview-stereo`) and the SR SDK you vendor offers no Vulkan weaver, the working pattern is D3D interop: create the full-SbS (2W × H) texture and a fence on the D3D11/D3D12 side, import them into Vulkan (`VK_KHR_external_memory_win32` with `D3D11_TEXTURE_BIT`, the fence as a timeline semaphore via `D3D12_FENCE_BIT`), copy layer 0 → left half and layer 1 → right half, signal value *n*, then wait for *n* and weave on the D3D side with B.2/B.3 unchanged. VKS3D's 3D Vision path (`src/present_nv3d.cpp` in ThreeDeeJay/VKS3D) is a public example of exactly this hand-off (`vulkan-multiview-stereo` §8.2). Whether a given SR SDK release ships a native Vulkan weaver has not been verified here.
+
 ---
 
 ## Reference: files / functions you'll touch

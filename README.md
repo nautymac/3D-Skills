@@ -14,6 +14,7 @@ They were written while shipping stereo 3D in the projects listed under [Referen
 | [`leiasr-integration`](leiasr-integration/SKILL.md) | Hand a side-by-side image to the LeiaSR (Simulated Reality) weaver: SDK vendoring via `bo3b/SR-lib`, init ordering, delay-load + SEH preflight so the binary launches without the SR runtime, DPI-awareness, the C-ABI shim pattern for MinGW hosts, tuning the weaver's own anti-crosstalk (and the sRGB-flag trap that silently disables it), and per-backend (OpenGL / DirectX 12 / DirectX 11) specifics. |
 | [`skybox-stereo-depth`](skybox-stereo-depth/SKILL.md) | Put sky, stars, sun/moon and distant flares at the right stereo depth under clip-space separation: why the depth → ∞ limit is just ±separation × viewWidth/2 (no convergence, FoV, aspect or stage-scale term survives), which of the two remaining strategies to use per element type, the pitfalls (coordinate wrap, double shift, legacy FoV helpers, sign conventions), calibration in screen-width fractions, and the exact conversion from a legacy world-units IPD calibration. |
 | [`rt64-stereo-3d`](rt64-stereo-3d/SKILL.md) | Add all of the above to an RT64-based N64 recompilation port: RT64's two-queue architecture, the two-pass per-eye render with override targets, projection classification via transform IDs and the recompilation-side patches that tag them, the atomic config bridge, and the RT64 aspect-rescale trap. |
+| [`vulkan-multiview-stereo`](vulkan-multiview-stereo/SKILL.md) | Make a Vulkan renderer (or a Vulkan app you don't own — DXVK, Zink, emulator backends) render both eyes in one pass with `VK_KHR_multiview`: 2-layer render targets and multiview render-pass / dynamic-rendering plumbing, SPIR-V patching with `ViewIndex`, UI/sky/fullscreen classification, the sky and mono-UI depth fixes, deferred/post-process fragment fixes, the operations multiview does not cover (copies, barriers, compute, ray tracing), and the traps mined from VKS3D's history. *Added in the nautymac fork; distilled from reading VKS3D's code and history, not yet verified on a display like the skills above.* |
 
 The skills cross-reference each other by name; every name they mention is in this repo.
 
@@ -25,12 +26,12 @@ Claude Code, user-wide:
 
 ```sh
 git clone https://github.com/oneup03/3D-Skills.git
-cp -r 3D-Skills/output3d 3D-Skills/dynamic3d 3D-Skills/extraoutput3d 3D-Skills/leiasr-integration 3D-Skills/skybox-stereo-depth 3D-Skills/rt64-stereo-3d ~/.claude/skills/
+cp -r 3D-Skills/output3d 3D-Skills/dynamic3d 3D-Skills/extraoutput3d 3D-Skills/leiasr-integration 3D-Skills/skybox-stereo-depth 3D-Skills/rt64-stereo-3d 3D-Skills/vulkan-multiview-stereo ~/.claude/skills/
 ```
 
 Claude Code, per project: copy the same folders into `.claude/skills/` inside the project instead.
 
-Once installed, the agent loads a skill automatically when a task matches its description, or you can invoke one directly with `/output3d`, `/dynamic3d`, `/extraoutput3d`, `/leiasr-integration`, `/skybox-stereo-depth`, or `/rt64-stereo-3d`.
+Once installed, the agent loads a skill automatically when a task matches its description, or you can invoke one directly with `/output3d`, `/dynamic3d`, `/extraoutput3d`, `/leiasr-integration`, `/skybox-stereo-depth`, `/rt64-stereo-3d`, or `/vulkan-multiview-stereo`.
 
 ## Reference implementations
 
@@ -45,6 +46,7 @@ The skills link to these public repositories for complete, working code:
 | [Kart-Public-3D](https://github.com/oneup03/Kart-Public-3D), [perfect_dark_3D](https://github.com/oneup03/perfect_dark_3D) | MinGW hosts using the C-ABI LeiaSR shim DLL; perfect_dark_3D is also the worked example for sky/star stereo depth | `leiasr-integration`, `skybox-stereo-depth` |
 | [aurora3D](https://github.com/oneup03/aurora3D) (`Stereo3D-rebased` branch) | WebGPU-on-D3D12 LeiaSR weave and the DPI-unaware-resize fix, used by [dusklight3D](https://github.com/oneup03/dusklight3D) | `leiasr-integration` |
 | [bo3b/SR-lib](https://github.com/bo3b/SR-lib) (`api_expansion` branch) | LeiaSR SDK packaged as a git submodule with a CMake package and `SRInterface*` wrapper | `leiasr-integration` |
+| [ThreeDeeJay/VKS3D](https://github.com/ThreeDeeJay/VKS3D) (GPL-3.0; studied, not copied) | Drop-in Vulkan ICD that injects multiview stereo into arbitrary Vulkan apps by patching SPIR-V, with generic sky/UI depth fixes and SbS / 3D Vision output | `vulkan-multiview-stereo` |
 
 ## License
 

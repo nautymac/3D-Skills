@@ -86,6 +86,8 @@ output.x += separation * (output.w - convergence);
 
 If you expose stereo parameters to injected/override shaders, use that layout verbatim (a `Texture2D<float4>` at `t125` is the established slot) so existing fixes port with no rewrite.
 
+> **A third form you will meet on Vulkan.** The VKS3D multiview injector emits `x += k * (1 - C * w)` per view. It is this same shear with `separation_eye = -k*C` and `convergence = 1/C` — but its `C` moves the screen plane *and* the background disparity together. Conversion and consequences: `vulkan-multiview-stereo` §4.2.
+
 ### 1.4 The sign-convention trap: you probably have TWO conventions, not one
 
 This is the single most common source of "my auto-convergence is inverted" or "the crosshair drifts the wrong way" bugs. A real codebase typically has **two independent per-eye sign switches** that must each be verified separately, because they live in different code paths and there is no guarantee they agree:

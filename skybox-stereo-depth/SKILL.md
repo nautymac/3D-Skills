@@ -123,6 +123,8 @@ The world-units form needed four strategies, because reusing a HUD helper at a h
 | **A. Project through the per-eye matrix** | Build the element as a 3D vertex at a large world Z, push it through the engine's per-eye projection, read off the screen position per eye | The element has a sensible world position (sun, moon, world-placed lights). Convergence, `bgScale` and any deliberate FoV scaling all just work, because the matrix is the source of truth. |
 | **B. Analytic infinity constant** | `shift_∞ = −dir × separation × eye_w/2`, computed once per eye per frame and added to the mono screen X — or, equivalently, `shift_px(INFINITY_SENTINEL, …)` | The element is direction-only (stars on a celestial sphere, fill-rect sprites) with no real world Z. Cheapest possible; exact. |
 
+When you can't touch the sky code at all (a Vulkan injector rewriting SPIR-V), Strategy B can still be applied per vertex in clip space — `x -= dir·separation·w`, plus `z = w` to pin it to the far plane — see `vulkan-multiview-stereo` §6.2, including the stretch-to-cover for fullscreen sky quads and the reversed-Z caveat.
+
 ### Recommendation by element
 
 | Element | Strategy | Why |

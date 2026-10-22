@@ -78,6 +78,8 @@ Two possibilities, both valid inputs to this skill's compose pass:
 
 Either way, by the time you reach this skill, you have two eye textures (plus, for the second case, a `scene_shift`/`scene_scale` pair computed upstream) and the rest is display formatting.
 
+A third shape, from single-pass Vulkan multiview: **one 2-layer array image** (layer 0 = left, layer 1 = right) instead of two textures. Bind it as a `sampler2DArray` / `Texture2DArray` and let `SampleEye()` pick the layer — every mode below works unchanged, with no per-eye copies. How that image gets produced (and the many operations that silently touch only layer 0) is in `vulkan-multiview-stereo`.
+
 ---
 
 ## 2. The per-eye texture cache
