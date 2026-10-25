@@ -1,6 +1,6 @@
 ---
 name: dynamic3d
-description: Add the adaptive layer on top of an off-axis stereo-3D renderer — Auto-Convergence (depth-buffer-driven control loop) and a depth-aware dynamic crosshair/overlay — using the CLIP-SPACE separation parameterization (NVIDIA/3Dmigoto convention, `x += separation * (w - convergence)`) rather than an eye-separation-in-metres one. Covers why the two are algebraically identical but not equally usable, a full migration path from the metres form (exact conversion formula plus a per-site checklist), why FoV auto-scaling and the reference-FoV slider disappear entirely under clip space, the sign-convention trap of having TWO independent conventions in one codebase, robust depth-buffer sampling (percentile-based "nearest", median+EMA "center", inverting device depth through the VIEWPORT scale/translate instead of assuming a clean half-range remap, and correcting the lateral bias of reading a PER-EYE depth buffer at an undisplaced screen position), the auto-convergence solve that no longer needs to co-scale separation to lock background disparity, camera-cut detection that snaps rather than eases (why a |z-ema|/ema threshold can never fire on approach, and why the symmetric ratio that fixes it thrashes on close motion unless the snap is approach-only), identifying a reticle you do not draw (position and shape for an anchored crosshair, texture identity when it tracks a target and no position test can name it), asymmetric near/far clamps on depth-shifted overlays (pop-out is not divergence), the rule that convergence must never be used as a scene-depth proxy in thresholds, and the two auto-scale strategies for shifted overlays (cover vs. fit). Engine-agnostic; examples in pseudo-C. Assumes you already have a per-eye off-axis stereo renderer — pairs with a stereo-output skill (SbS/anaglyph/interlaced compositor) for the parts this one doesn't cover.
+description: Add the adaptive layer on top of an off-axis stereo-3D renderer — Auto-Convergence (depth-buffer-driven control loop) and a depth-aware dynamic crosshair/overlay — using the CLIP-SPACE separation parameterization (NVIDIA/3Dmigoto convention, `x += separation * (w - convergence)`) rather than an eye-separation-in-metres one. Covers why the two are algebraically identical but not equally usable, a full migration path from the metres form (exact conversion formula plus a per-site checklist), why FoV auto-scaling and the reference-FoV slider disappear entirely under clip space, the sign-convention trap of having TWO independent conventions in one codebase, robust depth-buffer sampling (percentile-based "nearest", median+EMA "center", inverting device depth through the VIEWPORT scale/translate instead of assuming a clean half-range remap, and correcting the lateral bias of reading a PER-EYE depth buffer at an undisplaced screen position), the auto-convergence solve that no longer needs to co-scale separation to lock background disparity, camera-cut detection that snaps rather than eases (why a |z-ema|/ema threshold can never fire on approach, and why the symmetric ratio that fixes it thrashes on close motion unless the snap is approach-only), identifying a reticle you do not draw (position and shape for an anchored crosshair, texture identity when it tracks a target and no position test can name it), asymmetric near/far clamps on depth-shifted overlays (pop-out is not divergence), the rule that convergence must never be used as a scene-depth proxy in thresholds, and the two auto-scale strategies for shifted overlays (cover vs. fit). Also (§4.7) auto-convergence WITHOUT a depth buffer — for API-proxy wrappers and emulators — by block matching the two eye images: non-stalling read-back, the aperture-problem runaway on flat 2D images, aiming slightly in front of the screen, tagging captures with the values they were drawn with, a log-space controller with an asymmetric farther/nearer rule, and recovering when a cut pushes the content out of reach. Engine-agnostic; examples in pseudo-C. Assumes you already have a per-eye off-axis stereo renderer — pairs with a stereo-output skill (SbS/anaglyph/interlaced compositor) for the parts this one doesn't cover.
 ---
 
 # dynamic3d — auto-convergence and dynamic crosshair for clip-space stereo 3D
@@ -352,6 +352,97 @@ Snap to the median of the **last few raw samples**, not to the long median (whic
 - On disable, snap back to the manual value immediately (reset EMAs and history) rather than easing out. Easing reads as unexplained drift after the user just turned the feature off.
 - Clamp the auto pull-in floor to the larger of a near-plane-derived clamp and any user-configured minimum.
 
+### 4.7 No depth buffer? Estimate convergence from the two eye images
+
+§4.1–§4.6 assume you can read a depth buffer and turn it into view depth. Often you can't: an API-proxy wrapper doesn't know which of a game's depth targets is the scene, what its projection or units are, or whether it is reversed (`api-proxy-stereo`); an emulator holds depth in console-specific formats (`emulator-stereo`); a flat 2D game has no meaningful depth at all (`flat2d-layered-depth`). But once both eyes are rendered, **the depth is already in the picture as disparity** — measure it there. This is the auto convergence of three implementations that share one estimator: OGL3D ([`src/stereo.cpp`](https://github.com/nautymac/OGL3D-SR/blob/main/src/stereo.cpp), an `opengl32.dll` proxy), VK3D (a `vulkan-1.dll` proxy, not public) and Xenia-3D ([`src/xenia/gpu/stereo_autoconv.cc`](https://github.com/nautymac/Xenia-3D-SR/blob/xenia-3d/src/xenia/gpu/stereo_autoconv.cc)). *Added in the nautymac fork.*
+
+**Model.** With the shift of §1 (`x += sep_eye * (w - conv)`, `sep_eye = ±separation`), content at view depth `z` has a disparity, right eye minus left eye, of
+
+```
+d = S * (1 - conv / z)          S = separation * eye_width_px = disparity at infinity
+z = conv / (1 - d / S)          d > 0: behind the screen (up to S); d < 0: in front (unbounded)
+```
+
+The game's units cancel: `conv` is whatever the frame was drawn with, so the estimate comes out in the same units and can be fed straight back as a convergence. Nothing about the projection, FoV or depth format is needed.
+
+**Capture without ever waiting on the GPU.** Shrink both eyes ×8 in each direction and read them back asynchronously; a measurement that is a few frames old is fine, a stalled game is not.
+
+| | Shrink | Read-back | Cadence |
+|---|---|---|---|
+| OGL3D | `glBlitFramebuffer` (linear) of each eye to W/8 × H/8 (min 64×36) | 2 PBO slots + `glFenceSync`; mapped ≥ 2 frames later and only if `glClientWaitSync(fence, 0, 0)` says done; dropped after 120 frames | only when the game drew a **new** frame, at most every 2 frames |
+| VK3D | one `vkCmdBlitImage` of the SBS image into a 2 × (W/16) × H/8 image (each eye W/2 wide) | copy to a host buffer, then an empty `vkQueueSubmit` with a fence after the frame's submission; `vkGetFenceStatus` polled each frame | every 3 frames |
+| Xenia-3D | full-resolution eye outputs copied to a read-back buffer, shrunk ×8 on the worker | consumed once the emulator's completed-submission counter has passed the capture's submission | every 3 frames at 1280×720 per eye, scaled with the resolution (2x: 6, 3x: 13; clamped to 3–15) |
+
+Mapping a read-back the GPU has not finished blocks the game: OGL3D hit exactly that once, at start-up in its upscale mode, when the GPU queue sat behind a D3D11 presentation. Check the fence with a zero timeout and skip the frame if it isn't done.
+
+**Estimator — block matching on a worker thread.** On the shrunk images (luminance `r + 2g + b`, 0…1020), 12×12 blocks:
+
+```cpp
+const int bs = 12;
+const int max_neg = min(w / 2, ceil(6.0f  * S) + 3);   // in front: out to content 7x nearer than conv
+const int max_pos = min(w / 3, ceil(1.25f * S) + 3);   // behind: at most S, plus slack
+for each block (x0, y0), 4 px margin:
+    if (mean |horizontal gradient| < 6) continue;      // flat or horizontal-only: unmatchable
+    sad[d] = SAD(left block, right block shifted by d) for d in [-max_neg, max_pos]
+             // early exit once a partial sum exceeds sad[best] * 1.12 + 2*bs*bs
+    if (sad[d = 0] <= sad[best] + bs*bs) { ++identical; continue; }    // same in both eyes: 2D / HUD
+    if (second-best non-adjacent sad < sad[best] * 1.12 ||
+        second - sad[best] < 2*bs*bs)    { ++ambiguous; continue; }    // ties count as ambiguous
+    ++reliable;
+    disparity = best + parabolic sub-pixel fit;
+    depths.push(disparity >= 0.97f * S ? conv * 40 : conv / (1 - disparity / S));
+if (depths.size() < 6) return NaN;
+return 15th percentile of depths;                       // "nearest significant content"
+```
+
+1–13 ms per measurement — on a worker thread, never the render thread. Keep the `reliable / ambiguous / identical` counts: the controller needs them.
+
+**The aperture-problem runaway (found the hard way).** The first version let convergence run away on logos and intro screens (Amnesia's pre-menu logos, Darkest Dungeon's intro). Flat 2D pictures with horizontal edges match equally well at *every* horizontal offset; ties at SAD 0 passed the ambiguity test, and the first offset tried — the most negative, i.e. "very near" — won, faking a near object that pulled convergence down frame after frame. The three rules above fix it, and each is needed: require horizontal texture, treat ties as ambiguous, and count a block whose offset 0 matches as well as the best as 2D (identical), not as a depth.
+
+**Aim slightly in front of the screen, not at it.** Blocks within about half a shrunk pixel of zero disparity count as identical (2D) and drop out. With the nearest content aimed exactly at the screen plane it therefore *vanishes from the estimate on the way there*, the 15th percentile jumps to farther content, convergence moves back, the near content reappears — Burnout Revenge's chase camera swung 2.8 ↔ 4 every second. Xenia-3D aims the nearest content 1.25 shrunk pixels in front instead:
+
+```cpp
+target_depth = near_depth * clamp(1.0f + 1.25f / S, 1.0f, 1.6f);   // S in shrunk pixels
+```
+
+Convergence then keeps moving the same way while the content crosses the 2D band, and stops where the content is still measured (Burnout Revenge settled at 2.597 at the chase camera and 4.645 at the replay bumper camera). A user `auto_popout` percentage multiplies on top.
+
+**Tag every capture with the values it was drawn with.** The model inverts with the frame's own `conv` and `S`. Two ways to get that wrong, both seen: (1) labelling a capture with the convergence *after* this swap's update — every change then feeds back into the next estimate and convergence oscillates (Xenia-3D takes the eye shift and convergence before its per-swap update runs); (2) measuring frames the game didn't redraw — the image is older than the current convergence, and a mismatched tag biases the estimate in the direction of the last change (OGL3D only captures when the game drew a new frame, and tags it with the values that frame was rendered with).
+
+**Controller.** Convergence is driven in log space (disparity is linear in `1/conv`, §4.4). Two generations exist:
+
+| | v1 — OGL3D 1.0 | v2 — VK3D, Xenia-3D |
+|---|---|---|
+| Input | median of the last 5 estimates | last 9 estimates |
+| Direction rule | toward the median | **farther** only if the nearer quartile (`sorted[n/4]`) is farther — 7 of 9 agree; **nearer** if `min(median, max of the last three)` is nearer |
+| Deadband | `|log ratio| < 0.04` (~4 %) | same |
+| Gain | 0.2 below `|log ratio|` 0.3, else 0.45; ratio clamped to ±1.2 | same |
+| Rate limit | none | 0.8 log units/s; 2.5 when `|log ratio| > 0.7` and the estimates agree (inter-quartile spread < 0.35) — a camera cut; ×2 when moving nearer |
+| `auto_speed` | scales the gain | scales gain and rate |
+
+v2 exists because v1 swung between two groups of estimates: in Little Nightmares (UE4 through DXVK + VK3D) haze and screen-space effects that copy the picture produced estimates in two clusters (150–550 vs 7 000–22 000) alternating every ~55 ms, and the median of 5 jumped between them. v2 stays with the nearer group and moves farther only on strong agreement — comfort first, like §4.2's asymmetric EMA.
+
+**Content pushed out of reach.** After a cut from a wide shot to a close-up the old convergence can be ~12× too large (Broken Age's shot/reverse-shot cuts change the depth scale that much). Each eye's subject is then shifted out to the sides, what remains is flat backdrop, the estimator returns nothing, and a controller that only reacts to measurements holds still until the next cut. Rule (both generations):
+
+```cpp
+flat      = ever_good && reliable + ambiguous < 6 && identical < 20;   // nothing measurable
+unmatched = ambiguous >= 6 && ambiguous > 3 * reliable;                // visible but unmatchable
+if (flat || unmatched) {                       // on 2 consecutive measurements:
+    floor = last_good / (unmatched || ++lost_steps > 6 ? 32 : 4);
+    conv  = max(floor, conv * 0.4f);           // step down hard, past the median
+    reset the estimate history;                // the next real measurement takes over at once
+}
+// last_good = the median after a measurement with >= 20 reliable blocks (more reliable than ambiguous)
+```
+
+`flat` is not allowed before the first good measurement, or black loading screens at start-up throw away the remembered start value. The pop-out search range (`max_neg`, content up to 7× nearer than the convergence) is part of the same fix: it lets the estimator see the close-up again after one or two steps. Measured: starting at a convergence of 40 000 in a Broken Age close-up recovered in ~0.3 s; black loading screens in Little Nightmares step down hard and recover in ~1 s.
+
+**Start where it last settled.** Save the convergence to the config every 600 frames when it changed by more than 5 % (`auto_start`), and start from it next launch. VK3D saves the last *well-measured* value (`last_good`), not the current one, so a hard step taken on a black loading screen is never remembered; OGL3D 1.0 still saves the current value.
+
+**What was verified where.** v1 in OGL3D on a LeiaSR panel: Broken Age (holds still 9–20 s, moves only on scene changes, in 0.3–0.8 s), Amnesia: The Dark Descent, Darkest Dungeon. v2 in Xenia-3D, SBS and woven: WET (convergence follows each cutscene shot; checked by eye) and Burnout Revenge (settles after the pop-out target was added). v2 in VK3D itself was checked only in a simulation, not yet in a game; the pop-out target exists only in Xenia-3D so far.
+
+**Versus §4.1–§4.6.** Same goal — the nearest significant content at (or just in front of) the screen plane, nearer fast and farther slow — but no manual ceiling: these implementations let auto convergence move both ways and switch it **off** when the user presses a manual convergence key (Ctrl+F5/F6), with Ctrl+F2 to toggle it.
+
 ---
 
 ## 5. Dynamic / depth-aware crosshair and overlays
@@ -580,6 +671,6 @@ shift = clamp(s_px/eye_w, -lim, lim);                   // branch on raw, not on
 - **Building the per-eye off-axis projection matrix itself**, or composing two eye images for display (SbS/TaB/interlaced/anaglyph/autostereo weaver) — see `output3d` (engine-agnostic) or the engine-specific sibling `rt64-stereo-3d`.
 - **Sky/background elements at (near-)infinite depth** and the FoV-compensation cancellation trap specific to that limit — see `skybox-stereo-depth`.
 - **Head tracking.** This skill assumes a fixed viewer; head-coupled perspective is a separate offset applied to the eye positions before any of this math runs. Note §1.1's warning: the derived eye baseline is no longer constant, which matters if you mix the two.
-- **How to obtain a depth buffer in the first place** (engine hooks, render-target interception, compute-shader histograms). This skill assumes you can already get *a* per-pixel depth sample, and covers only what to do with it.
+- **How to obtain a depth buffer in the first place** (engine hooks, render-target interception, compute-shader histograms). §4.1–§4.6 assume you can already get *a* per-pixel depth sample, and cover only what to do with it; when you can't, §4.7 estimates depth from the two eye images instead.
 - **Autostereoscopic panel weaving (LeiaSR etc.)** — see `leiasr-integration`. Note that `separation` from §1.3 doubles as a directly comparable crosstalk budget on such panels.
 - **Injecting stereo into shaders you don't control** (3Dmigoto/Geo-11-style fixes). §1.3 gives the parameter layout to expose; the fix-authoring workflow itself is out of scope.

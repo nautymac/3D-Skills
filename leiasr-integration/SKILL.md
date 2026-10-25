@@ -1,6 +1,6 @@
 ---
 name: leiasr-integration
-description: Integrate the LeiaSR autostereoscopic display weaver (Simulated Reality SDK) into a game or renderer that already produces a side-by-side stereo image. Covers the SR runtime contract (SbS-packed input texture, weaver hand-off, init ordering), shipping a binary that runs on machines without the SR runtime installed (delay-load + SEH preflight + LoadLibraryW gate), upscaling from a low render resolution to the SR panel's native resolution via the weaver, OS window-handle plumbing (SDL / GLFW / Win32), per-monitor-DPI-awareness (the weave must land 1:1 on physical panel pixels — on a >100%-scaled display a non-DPI-aware host gets its window/weave virtualized and stretched, collapsing the 3D; set it before window creation, plus the SR-service one-shot-resize correction), vendoring the SDK itself as a git submodule (bo3b/SR-lib, api_expansion branch — a public repo) whose CMake package (SRLib::SDK / SRLib::SR / srlib_apply_delayload) replaces the hand-rolled SDK paths and delay-load list, its SRInterfaceDX9/DX11/DX12/OGL wrapper plus switchable-lens-hint and polled head/eye tracking, its nested per-architecture layout, and the CI credential plumbing (read-access PAT + global insteadOf rewrite) needed only if you mirror it into a private repo of your own, the switchable lenticular lens as global display state you must hand back when you stop weaving, and graceful fallback to plain Side-by-Side when SR isn't available. Also covers diagnosing the failure mode where output is flat mono while every SDK call reports success, and ghost reduction in two layers: tuning the weaver's OWN anti-crosstalk (mode Off/Static/Dynamic, strength as a multiple of the panel's measured factors, and the weaving contrast) — absent from the IDX*Weaver1 interfaces but reachable through the runtime's IWeaverSettings1 via query<>(), which SR-lib's SR.hpp wraps as SetCrosstalk() plus raw-SDK helpers, with tested starting values and the ABI caveat of a hand-declared interface — and why the weaver's cancellation still leaves visible ghosting on high-contrast game content (its correction clips against the ends of the range), plus the sRGB-vs-linear space rule that decides whether the compose-shader fix helps or hurts (and why setShaderSRGBConversion(false,false) on the display-encoded UNORM content almost every game produces silently under-cancels and makes the anti-crosstalk Strength control look inert, with no colour symptom) - that shader fix itself lives in the output3d skill. Backend-neutral entry points are stable; per-backend sections exist for OpenGL, DirectX 12 and DirectX 11 — Vulkan / etc. can be added alongside them.
+description: Integrate the LeiaSR autostereoscopic display weaver (Simulated Reality SDK) into a game or renderer that already produces a side-by-side stereo image. Covers the SR runtime contract (SbS-packed input texture, weaver hand-off, init ordering), shipping a binary that runs on machines without the SR runtime installed (delay-load + SEH preflight + LoadLibraryW gate), upscaling from a low render resolution to the SR panel's native resolution via the weaver, OS window-handle plumbing (SDL / GLFW / Win32), per-monitor-DPI-awareness (the weave must land 1:1 on physical panel pixels — on a >100%-scaled display a non-DPI-aware host gets its window/weave virtualized and stretched, collapsing the 3D; set it before window creation, plus the SR-service one-shot-resize correction), vendoring the SDK itself as a git submodule (bo3b/SR-lib, api_expansion branch — a public repo) whose CMake package (SRLib::SDK / SRLib::SR / srlib_apply_delayload) replaces the hand-rolled SDK paths and delay-load list, its SRInterfaceDX9/DX11/DX12/OGL wrapper plus switchable-lens-hint and polled head/eye tracking, its nested per-architecture layout, and the CI credential plumbing (read-access PAT + global insteadOf rewrite) needed only if you mirror it into a private repo of your own, the switchable lenticular lens as global display state you must hand back when you stop weaving, and graceful fallback to plain Side-by-Side when SR isn't available. Also covers diagnosing the failure mode where output is flat mono while every SDK call reports success, and ghost reduction in two layers: tuning the weaver's OWN anti-crosstalk (mode Off/Static/Dynamic, strength as a multiple of the panel's measured factors, and the weaving contrast) — absent from the IDX*Weaver1 interfaces but reachable through the runtime's IWeaverSettings1 via query<>(), which SR-lib's SR.hpp wraps as SetCrosstalk() plus raw-SDK helpers, with tested starting values and the ABI caveat of a hand-declared interface — and why the weaver's cancellation still leaves visible ghosting on high-contrast game content (its correction clips against the ends of the range), plus the sRGB-vs-linear space rule that decides whether the compose-shader fix helps or hurts (and why setShaderSRGBConversion(false,false) on the display-encoded UNORM content almost every game produces silently under-cancels and makes the anti-crosstalk Strength control look inert, with no colour symptom) - that shader fix itself lives in the output3d skill. Also covers hosting the weaver in a process you don't own (a proxy DLL such as dxgi.dll / opengl32.dll / d3d9 hooks, next to another wrapper such as 3DMigoto/geo-11 or TriDef): the 32-bit runtime's Virtual PC probe (illegal instruction 0F 3F 07 0B) that a host's vectored exception handler — Mono in 32-bit Unity games — swallows, hanging or killing the game the moment the weaver is created, and the first-VEH fix; never creating throw-away devices/windows inside another wrapper; finding the real swap chain/device inside wrapper objects; sRGB back buffers (typeless copy, matching input/output views); DPI-unaware games (IAT-patched SR geometry calls, upscaled views); GL state the game leaves on at frame end (blend, clip control); weaver teardown on a thread another thread is waiting for; a stale lens after a crash (restart the SR Service); field data that the per-eye width also weaves correctly on runtime 1.34.10. Backend-neutral entry points are stable; per-backend sections exist for OpenGL, DirectX 12, DirectX 11, Vulkan (through a D3D11 shared texture and a D3D11 fence imported as a timeline semaphore — the SDK has no Vulkan weaver) and Direct3D 9.
 ---
 
 # LeiaSR autostereoscopic display integration
@@ -12,7 +12,8 @@ This skill captures everything you need to **hand a side-by-side stereo image of
 The skill is organized so other graphics-API integrations can be added without restructuring:
 
 1. **Shared concerns** (Part A) — apply to every backend: getting the SDK into your tree at all (start at A.0), the SbS-packed input contract, the SR runtime lifecycle, surviving on machines without the SR runtime (the delay-load + SEH dance), upscaling from low render resolutions, window-handle plumbing.
-2. **Per-backend specifics** (Part B) — what changes between GL / DX / Vulkan: which weaver type to create, which texture-handle type to pass, where the weaver writes its output. **OpenGL** (B.1) is the worked example, with **DirectX 12** (B.2) and **DirectX 11** (B.3) alongside it; other backends can append their own section using the same structure.
+2. **Per-backend specifics** (Part B) — what changes between GL / DX / Vulkan: which weaver type to create, which texture-handle type to pass, where the weaver writes its output. **OpenGL** (B.1) is the worked example, with **DirectX 12** (B.2), **DirectX 11** (B.3), **Vulkan** (B.4, through D3D11 interop) and **Direct3D 9** (B.5) alongside it; other backends can append their own section using the same structure.
+3. **Hosting the weaver in a process you don't own** (A.13) — when the weave runs inside a proxy DLL or a hook in somebody else's game (32-bit Unity games, other stereo wrappers, DPI-unaware games, emulators): the failure modes that never show up when you own the host. *Added in the nautymac fork from the geo-11_SR SRWeave, OGL3D, VK3D, DX12_3D, Xenia-3D, Azahar-SR and TriDef SRWeave integrations, all weaving on a SpatialLabs panel (SR Platform 1.34.10).*
 
 A reference implementation lives in the [RingRacers-3D](https://github.com/oneup03/RingRacers-3D) fork ([`src/hwr2/stereo_leiasr.hpp`](https://github.com/oneup03/RingRacers-3D/blob/master/src/hwr2/stereo_leiasr.hpp) / [`stereo_leiasr.cpp`](https://github.com/oneup03/RingRacers-3D/blob/master/src/hwr2/stereo_leiasr.cpp) + the `src/CMakeLists.txt` delay-load block) — when in doubt, that's the canonical source for the OpenGL patterns below. Other public integrations referenced throughout:
 
@@ -25,6 +26,12 @@ A reference implementation lives in the [RingRacers-3D](https://github.com/oneup
 | DirectX 12 + DirectX 11 (UE injection) | [UU3D](https://github.com/oneup03/UU3D) (Unreal Universal 3D Mod, `flat3d-afw` branch) | [`src/mods/vr/flat3d/Flat3DCompositorD3D12.cpp`](https://github.com/oneup03/UU3D/blob/flat3d-afw/src/mods/vr/flat3d/Flat3DCompositorD3D12.cpp), [`Flat3DCompositorD3D11.cpp`](https://github.com/oneup03/UU3D/blob/flat3d-afw/src/mods/vr/flat3d/Flat3DCompositorD3D11.cpp) |
 | DirectX 11 (OpenVR driver) | [VRto3D](https://github.com/oneup03/VRto3D) | [`vrto3d/src/presenter/leiasr_presenter.cpp`](https://github.com/oneup03/VRto3D/blob/main/vrto3d/src/presenter/leiasr_presenter.cpp) |
 | SDK packaging | [bo3b/SR-lib](https://github.com/bo3b/SR-lib) (`api_expansion` branch) | `CMakeLists.txt`, `SR.hpp` / `SR.cpp` |
+| DirectX 11, x64 + x86 (`dxgi.dll` proxy next to 3DMigoto/geo-11) | [geo-11_SR](https://github.com/nautymac/geo-11_SR) (`master`) | [`SRWeave/src/srweave_geo11.cpp`](https://github.com/nautymac/geo-11_SR/blob/master/SRWeave/src/srweave_geo11.cpp) — raw SDK `CreateDX11Weaver`, the Virtual PC probe handler (A.13.1), factory hooks (A.13.2), sRGB views (A.13.3) |
+| OpenGL in an `opengl32.dll` proxy; DX11 for its upscale mode | [OGL3D-SR](https://github.com/nautymac/OGL3D-SR) (`main`; `flato3d` branch adds the clip-control reset) | [`src/srout.cpp`](https://github.com/nautymac/OGL3D-SR/blob/main/src/srout.cpp), [`src/stereo.cpp`](https://github.com/nautymac/OGL3D-SR/blob/main/src/stereo.cpp) (`GlStateGuard`), [`src/present.cpp`](https://github.com/nautymac/OGL3D-SR/blob/main/src/present.cpp) (`PatchSrModules`) |
+| Direct3D 9 + DirectX 11 hooks behind TriDef 3D | [tridef3d-win11-injector](https://github.com/nautymac/tridef3d-win11-injector) (`master`) | [`srweave/src/dx9.cpp`](https://github.com/nautymac/tridef3d-win11-injector/blob/master/srweave/src/dx9.cpp), [`srweave/src/dx11.cpp`](https://github.com/nautymac/tridef3d-win11-injector/blob/master/srweave/src/dx11.cpp) |
+| DirectX 12 in an emulator (Xbox 360) | [Xenia-3D-SR](https://github.com/nautymac/Xenia-3D-SR) (`xenia-3d` branch) | [`tools/xenia3d_sr/xenia3d_sr.cc`](https://github.com/nautymac/Xenia-3D-SR/blob/xenia-3d/tools/xenia3d_sr/xenia3d_sr.cc) (bridge DLL), [`src/xenia/ui/d3d12/d3d12_presenter.cc`](https://github.com/nautymac/Xenia-3D-SR/blob/xenia-3d/src/xenia/ui/d3d12/d3d12_presenter.cc) |
+
+Unpublished integrations quoted below (no public source): **VK3D** (`vulkan-1.dll` proxy, Vulkan → D3D11 interop, B.4), **DX12_3D** (`d3d12.dll` proxy, DX12 weaver) and **Azahar-SR** (3DS emulator, GL weaver and Vulkan → D3D11 interop, B.4).
 
 ---
 
@@ -228,6 +235,8 @@ Option 1 is what you want if "highest quality" matters more than GPU cost. It re
 > ⚠ **There's a second, separate failure mode that produces the SAME visible symptom — "weave stretched to 2× display width, left half visible."** It's the command-list rasterizer viewport not being reset between a prior compose pass and the weave. See B.2.2 for the diagnosis and fix.
 >
 > *(Empirical caveat — see B.2.2: the SR DX12 sample and [VRto3D's DX11 LeiaSR presenter](https://github.com/oneup03/VRto3D/blob/main/vrto3d/src/presenter/leiasr_presenter.cpp) both pass **per-eye** width, not the combined width, on those backends. Cross-check what your specific backend's reference code actually ships before settling on either convention.)*
+>
+> *(Field data, nautymac fork — SR Platform 1.34.10 on a SpatialLabs panel: seven integrations pass the **per-eye** width for a texture that is `2 × eyeW` wide and weave correctly, with depth confirmed by eye — the raw-SDK GL weaver (OGL3D, Azahar-SR), DX11 (geo-11_SR SRWeave, OGL3D upscale mode, VK3D and Azahar-SR via interop), DX12 (DX12_3D, Xenia-3D) and DX9 (TriDef SRWeave). On that runtime the argument evidently does not choose the sampled region; the weaver takes the extent from the texture. So both conventions weave there. Use the documented one (the texture's full width) in new code, but don't blame a corrupt weave on a per-eye value before checking the real texture size and the viewport (B.2.2).)*
 
 > ⚠ **Don't lie about texture dimensions.** Passing `2W` while the texture is actually `W × H` makes the weaver sample past the right edge and produces visible garbage. The dimensions must match the texture's allocated size.
 
@@ -840,6 +849,20 @@ After binding the default framebuffer, the viewport should be the full SDL windo
 
 16. **`setShaderSRGBConversion(false, false)` on display-encoded content.** This is the default trap for any engine whose swap chain is plain `*_UNORM`, which describes almost all of them, because "UNORM" reads as "linear". Colours look completely normal either way, since the read and write conversions mirror each other. Ghosting is just worse than it should be, and the anti-crosstalk Strength control (A.11.1) seems to do nothing, because the weaver's linear-light cancellation is being applied to encoded values. Use `(true, true)` unless your pipeline really holds linear values (B.2 gamma note). Flip your compose shader's ghost-reduction space at the same time (A.11.2).
 
+17. **A 32-bit game hangs or crashes the moment the weaver is created.** The log ends after the SR context was created and never reports the weaver. The 32-bit runtime (`DimencoWeaving32.dll`) probes for Microsoft Virtual PC with an illegal instruction it expects to catch with its own SEH frame, and a vectored exception handler in the host gets it first. Mono's does exactly that, so expect it in any 32-bit Unity game (found in Absolute Drift). Fix and diagnosis: A.13.1. x64 is not affected.
+
+18. **The desktop stays lensed after the game died.** A process killed with the lens hint on leaves the panel lensed. Neither a new client's `disable()` nor restarting `SRSession.exe` clears the stale hint; restarting the `SR Service` Windows service does. See A.10's last paragraph.
+
+19. **Polling the lens state per frame.** `SwitchableLensHint::isEnabled()` is an IPC round trip to the SR service, and it measured about **45 ms per call** (SR Platform 1.34). Read it at a mode switch or in a diagnostic, never in the present path. Track what you asked for instead (A.10).
+
+20. **The exit hangs and the tracking camera stays on.** `destroy()` on a DX11 weaver waits for the weaver's processing threads, and those talk to the render window's thread. In an emulator that stops emulation on its emulation thread while the GUI thread waits for it, destroying the weaver there deadlocked the exit: the process lost its window, kept running, and kept the SR context and camera alive (SR log ends at "Lens disable"). Retire weavers to a cleanup thread (A.13.5).
+
+21. **Black weave from a 10-bit input.** With the DX12 weaver, an `R10G10B10A2_UNORM` input (Xenia's guest output) wove to black, also through a stable copy. The same picture composed into a `B8G8R8A8_UNORM` texture first wove correctly. Hand the weaver an 8-bit-per-channel input unless you have verified another format on your runtime.
+
+22. **The input copy of an sRGB back buffer.** If the copy is a typed `*_UNORM_SRGB` texture, `CreateShaderResourceView` with any other format fails (`E_INVALIDARG` every frame, so weaving never starts). If the input view and the output RTV differ in sRGB-ness, the gamma is encoded twice and the woven picture is too bright. Create the copy **typeless**, and give the input SRV and the output RTV the same format (A.13.3). This is a separate trap from #16, which is about the weaver's own conversion flags.
+
+23. **Exclusive fullscreen at a resolution other than the panel's.** The game's back buffer is scaled to the panel after weaving, so the lenticular pattern no longer lines up with the lens and the 3D collapses. A.12 #8 checks the sizes. A game that offers no native-resolution mode needs borderless at native resolution, or an upscale path (A.13.4) that weaves at the panel's resolution. Log a warning when back buffer and window client differ; a user can fix that themselves.
+
 ## A.10 The switchable lens is global state — hand it back
 
 Some SR panels have a switchable lenticular layer: lens off is an ordinary
@@ -874,6 +897,19 @@ A useful side effect for debugging: the enable/release transitions are the
 cheapest proof that your context lifetime is behaving. If you see the lens
 enabled and never released across a mode switch, your release path isn't
 running.
+
+**When the process that held the lens is gone.** A game that crashes or is
+killed while weaving never releases its hint, and the panel stays lensed over
+the desktop afterwards. Seen with a DX12 proxy in Helldivers 2.
+What did **not** help: a fresh client creating its own context and calling
+`disable()` (its preference is ORed with the stale one), and restarting the
+`SRSession.exe` tray process. What did: restarting the **`SR Service`** Windows
+service (`Restart-Service -Name 'SR Service' -Force`, elevated). Eye tracking
+and `SRSession` keep running across it. Check the lens afterwards. A ten-line
+checker is enough: `SRContext::create`, `SwitchableLensHint::create`,
+`initialize`, print `isEnabled()`. Pitfall #19 explains why you don't poll it.
+Whether a service restart also clears the wedged state in pitfall #14 is
+untested; try it before restarting Windows.
 
 ## A.11 Ghost reduction — tune the weaver's cancellation, then fix the clipping in your shader
 
@@ -1074,6 +1110,197 @@ backwards from it to conclusions about the runtime's internals.
 10. **Ghost-reduction sanity** (A.11.2, technique in `output3d` §3.4). Find high-contrast content — white subtitles or a bright HUD over a dark scene — and try each lever alone. Black lift is the one aimed at what actually clips here, so on a cancelling panel expect it to reach a given ghost reduction at less visible cost than the contrast squeeze; if it does nothing while contrast still helps, the ghosting is not clipping-driven on that panel and contrast is working purely by shrinking the inter-eye difference. Confirm the no-op defaults (`1.00` / `0.00`) are bit-exact, that both are skipped under HDR, and that a 3D screenshot taken with them active is captured without them.
 
 11. **Scaled-display DPI test.** Set the SR panel (or whichever monitor the window occupies) to >100% Windows display scale — e.g. 150% — and launch. The weave must still land 1:1 on panel pixels: clean autostereo, no DPI-factor zoom/crop, no blur. If the image looks zoomed by exactly the scale factor, the process isn't per-monitor-DPI-aware (A.2.2) and/or the SR service's one-shot resize wasn't corrected (pitfall #11). Log the runtime awareness readback and confirm it says per-monitor.
+
+12. **32-bit Unity game** (x86 builds only). Launch any 32-bit Unity title with weaving on. The log must show the weaver created, the first woven frame, and your handler's "Virtual PC probe answered" line, and the game must keep responding for a minute or more. A hang right after context creation means the probe handler is missing or was installed too early (A.13.1).
+
+13. **Kill test.** Kill the host process (Task Manager) while it weaves, and look at the desktop. If it stays lensed, that is the runtime's behaviour, not yours. Know the service restart that clears it (A.10, last paragraph) before a user reports it.
+
+14. **Exit test.** Close the host from its own UI while weaving, several times. The process must actually end (no windowless instance left in Task Manager), and the tracking camera must turn off. A process that outlives its window with the camera on is a weaver destroyed on the wrong thread (pitfall #20).
+
+15. **sRGB back buffer test** (when you copy the game's back buffer). Render a flat mid-grey (128) into an sRGB back buffer and read the woven screen pixel back with `GetPixel` from a DPI-aware process. It must still read 128; a double gamma encode read 188 (A.13.3).
+
+16. **Input test when hosted next to another wrapper.** After weaving starts, keyboard, mouse and controller must still reach the game. Compare a menu screenshot before and after a key press. Lost input means your code created a window or device that the other wrapper subclassed (A.13.2).
+
+---
+
+## A.13 Hosting the weaver in a process you don't own
+
+*Added in the nautymac fork. Everything here comes from integrations that weave inside somebody else's process, verified on an Acer SpatialLabs panel (SR Platform 1.34.10): a `dxgi.dll` proxy that weaves geo-11/3DMigoto's SBS output (geo-11_SR SRWeave, x64 and x86), hooks behind TriDef 3D (D3D9 and DX11), drop-in `opengl32.dll` / `vulkan-1.dll` / `d3d12.dll` proxies (OGL3D, VK3D, DX12_3D), and bridge DLLs in two emulators (Xenia-3D, Azahar-SR). The `api-proxy-stereo` skill covers how those proxies make the stereo pair, and `wrapper-injection` how such a DLL gets loaded at all (its §5 lists the SR traps below in short form). This section is only about the weaver.*
+
+When the weave runs in a game you didn't write, A.1–A.12 still hold. In addition, the host's exception handlers, the other wrappers in the process, its DPI awareness and its GL state all act on the weaver.
+
+### A.13.1 32-bit hosts: answer the runtime's Virtual PC probe first
+
+While the weaver is being created, the 32-bit runtime (`DimencoWeaving32.dll`, SR Platform 1.34.10, RVA `0x3e1c6`) checks whether it runs inside Microsoft Virtual PC. It executes the "vpcext" instruction `0F 3F 07 0B` under its own SEH frame. On real hardware that raises `EXCEPTION_ILLEGAL_INSTRUCTION`, and the DLL's handler sets `EBX = 0xFFFFFFFF` ("not Virtual PC") and skips the four bytes.
+
+**Vectored exception handlers run before any SEH frame.** A host whose VEH takes an illegal instruction for a crash never lets the DLL see it. Mono's VEH does exactly that, and every 32-bit Unity game built with the Mono scripting backend has it (IL2CPP builds were not tested):
+
+- **With Unity's render thread:** the render thread stays inside `mono.dll` and the main thread waits for it. Windows reports *not responding* (AppHangB1).
+- **With single-threaded rendering** (`-force-gfx-direct`): the game dies with `0xC0000409`.
+- **In your log:** it ends after the SR context was created, with no "weaver created" line.
+
+The case found was Absolute Drift (Unity 2017.4, x86). A 32-bit non-Unity game (Sine Mora EX, D3D9 through dgVoodoo) wove fine, and the x64 runtime DLL contains no such probe. It was diagnosed from a 32-bit minidump of the hung game (take it with a 32-bit tool, e.g. `procdump -ma` or `MiniDumpWriteDump` from a 32-bit process): the exception record was `0xC000001D` at `DimencoWeaving32.dll+0x3e1c6`, and the stuck thread was in `mono.dll`.
+
+**Fix:** put a handler in front of the host's that does exactly what the DLL's own handler does, for that one instruction only (from [geo-11_SR `SRWeave/src/srweave_geo11.cpp`](https://github.com/nautymac/geo-11_SR/blob/master/SRWeave/src/srweave_geo11.cpp); the OGL3D-SR and tridef3d-win11-injector x86 builds carry the same code):
+
+```cpp
+#ifndef _WIN64
+std::atomic<int> g_vpcProbes{0};
+
+LONG CALLBACK VpcProbeHandler(EXCEPTION_POINTERS* ep)
+{
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ILLEGAL_INSTRUCTION) return EXCEPTION_CONTINUE_SEARCH;
+    const unsigned char* ip = (const unsigned char*)(ULONG_PTR)ep->ContextRecord->Eip;
+    __try {
+        if (ip[0] != 0x0F || ip[1] != 0x3F || ip[2] != 0x07 || ip[3] != 0x0B) return EXCEPTION_CONTINUE_SEARCH;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    ep->ContextRecord->Ebx = 0xFFFFFFFF;   // "not Virtual PC", what the DLL's own handler sets
+    ep->ContextRecord->Eip += 4;           // skip 0F 3F 07 0B
+    g_vpcProbes++;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+#endif
+
+// installed at the first SR call (the game's own handlers, Mono's included, are registered by then)
+void InstallVpcProbeHandler()
+{
+#ifndef _WIN64
+    static bool done = false;
+    if (done) return;
+    done = true;
+    AddVectoredExceptionHandler(1, VpcProbeHandler);
+#endif
+}
+```
+
+Details that matter:
+
+- **Install it at the first SR call, not in `DllMain`.** `AddVectoredExceptionHandler(1, …)` puts the handler at the head of the list *as it is at that moment*. A handler the game registers later with `First = 1` goes in front of yours again. Mono has registered its handler long before your first `SRContext::create()`.
+- **Match the exact bytes**, and read them under `__try`. Any other illegal instruction is still the host's business.
+- **Log the count** after weaver creation (SRWeave: *"SR runtime Virtual PC probe (illegal instruction 0F 3F 07 0B) answered ahead of the game's exception handlers (1 so far)"*). A user's log then shows the handler ran.
+- **Harmless first-chance lines.** In a host whose handlers leave the probe alone, a first-chance exception logger shows `0xC000001D at DimencoWeaving32.dll+0x3e1c6` once at start-up, together with a `0xC0000096` (privileged instruction) first chance just before it. The DLL handles both, and games ran normally with them (Amnesia, Broken Age through OGL3D). Don't chase them.
+- **The x86 runtime DLLs have their own names and folder**: `SimulatedRealityCore32.dll`, `SimulatedRealityDisplays32.dll`, `SimulatedRealityDirectX32.dll`, … under `C:\Program Files (x86)\…\Platform\bin`. Your delay-load list (A.3.1) and runtime lookup need the 32-bit names. The x86 SDK import libraries were not in the win64 SDK package used here: they came from the win32 runtime installer bundled inside it (unpacked with 7-Zip). The 32-bit `dxgi.dll` exports also need their own `.def`, because the ordinals differ from x64.
+
+Verified in game with SRWeave: Absolute Drift wove and stayed responsive; its log shows the probe answered between context and weaver creation, and the first woven frame 40 ms later. Before the fix it hung every time. The OGL3D and TriDef x86 builds carry identical code, but only SRWeave's was tested in a Unity game.
+
+### A.13.2 Next to another wrapper: no throw-away objects, hook the real factory
+
+The usual way for a hook DLL to find `Present` is to create a dummy window, device and swap chain at start-up and read their vtables. **Inside 3DMigoto/geo-11 that broke the game.** geo-11 wraps and subclasses every device, swap chain and window it sees. The dummy window's subclassing replaced the game window's procedure inside geo-11, and keyboard, mouse and controller input stopped reaching the game.
+
+What works (SRWeave, a `dxgi.dll` proxy loaded by geo-11's `d3d11.dll`):
+
+1. On the first call into your `dxgi.dll` exports, create a factory from the **real** System32 `dxgi.dll` (`CreateDXGIFactory1`). A factory needs no window.
+2. Hook its `CreateSwapChain` (vtable slot 10) and `CreateSwapChainForHwnd` (`IDXGIFactory2`, slot 15).
+3. When the game's swap chain comes back, hook `Present` (8), `ResizeBuffers` (13) and `Present1` (`IDXGISwapChain1`, 22) on the **real** swap chain.
+4. Hook a target only if it lies inside System32 `dxgi.dll` (`d3d9.dll` for D3D9). Otherwise log it and skip: you would be hooking another wrapper's code.
+
+**The object you are handed may be a wrapper.** Because SRWeave hooks the *real* factory, the swap chain it sees is normally the real one: in every geo-11 game it wove, no unwrapping was needed. Behind TriDef 3D it was. TriDef's DXGI layer (`TriDefDXGI64.dll`) returns the swap chain as a complete wrapper, and so does TriDef's D3D9 device (a temporary device whose `GetSwapChain(0)` even failed with `D3DERR_INVALIDCALL`). To find the real object inside one:
+
+- Scan the wrapper's pointer-sized fields for an object whose vtable mostly points into the system DLL: at least 12 of the first 18 slots for `IDXGISwapChain`, at least 80 of 119 for `IDirect3DDevice9`.
+- Confirm it with `QueryInterface`, then hook that object's vtable.
+- Read every pointer with an exception-safe read.
+
+In TriDef's DXGI wrapper the real swap chain was field 1. SRWeave keeps the same scan as a fallback for wrappers that hand out wrapped swap chains.
+
+At present time:
+
+- **Order:** your hook runs inside the real `Present`, so after the other wrapper has composed its SBS picture into the back buffer. Copy the back buffer, weave into it, then call the original `Present`.
+- **Re-entry:** guard against it with a thread-local flag, because the weave's own work can come back through the wrappers. Skip `DXGI_PRESENT_TEST`.
+- **State:** save and restore the immediate context's state around your copy and weave (D3D9: a `D3DSBT_ALL` state block plus render target, depth surface and viewport). The game's next draw must not see yours.
+- **D3D9 `Reset`:** call `invalidateDeviceObjects()` before it and `restoreDeviceObjects()` after (B.5).
+
+### A.13.3 sRGB back buffers: typeless copy, one view format for input and output
+
+When you weave a copy of the game's back buffer, the back buffer's format decides two things:
+
+- **The copy must be typeless.** A typed `*_UNORM_SRGB` texture accepts views of exactly that format. With any other view format `CreateShaderResourceView` failed with `E_INVALIDARG` every frame, so weaving never started (art of rally, Unity, exclusive fullscreen, `R8G8B8A8_UNORM_SRGB` back buffer). `CopyResource` from the typed back buffer into a typeless texture of the same family is legal.
+- **The input view and the output view must agree.** An sRGB back buffer with a UNORM input view and an sRGB output RTV encodes gamma twice, and the picture is too bright (Red Faction Guerrilla Re-Mars-tered). Swap-chain buffers accept the sibling UNORM/sRGB view, so create the output RTV in the **same** format as the input SRV. Fall back to the back buffer's own format only if the sibling view is refused, and log a warning.
+
+```cpp
+// copy texture: TypelessOf(backBuffer.Format)            e.g. R8G8B8A8_UNORM_SRGB -> R8G8B8A8_TYPELESS
+// view format vf: auto = follow the back buffer          sRGB back buffer -> *_UNORM_SRGB, else *_UNORM
+D3D11_TEXTURE2D_DESC td = bd;
+td.Format    = TypelessOf(bd.Format);
+td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+dev->CreateTexture2D(&td, nullptr, &copy);
+D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};  sd.Format = vf;  sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;  sd.Texture2D.MipLevels = 1;
+dev->CreateShaderResourceView(copy, &sd, &srv);          // weaver input
+D3D11_RENDER_TARGET_VIEW_DESC rd = {};    rd.Format = vf;  rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+dev->CreateRenderTargetView(backBuffer, &rd, &bbRtv);    // weaver output: same sRGB-ness as the input
+weaver->setInputViewTexture(srv, w / 2, h, vf);
+```
+
+Verified with a test app that fills the back buffer with flat grey 128: the screen pixel read back 188 with the mismatched views and 128 after the fix. RFG's brightness was then checked by eye. This is independent of pitfall #16, which is about the weaver's own conversion flags. Use both rules together.
+
+### A.13.4 DPI-unaware games
+
+A.2.2 says to make the process per-monitor DPI aware before init. In a game you don't own, choosing that changes the game too. Two options worked (OGL3D):
+
+**(a) Make the whole process aware from the proxy's `DllMain`** (`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`, before the game creates its window). The game then sees physical pixels and can render at the panel's native resolution. Amnesia: The Dark Descent ran woven at 3840 × 2160 once its own config asked for that size. This is the simplest option, but the game's UI may become tiny at 4K.
+
+**(b) Keep the game unaware at its own resolution and present yourself.** This is OGL3D's upscale mode:
+
+- The eyes go GL → D3D11 through `WGL_NV_DX_interop2`. A second **GL** window presented from a DPI-unaware process crashed in NVIDIA's DXGI-based GL present.
+- They are woven by the **DX11** weaver at the panel's resolution, into your own per-monitor-aware popup over the game window.
+- Window details:
+  - The window is owned by the game window (so it stays above it without being topmost) and created with `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`.
+  - Windows may give an owned window its owner's DPI awareness. Check `GetWindowDpiAwarenessContext`, and if it is not per-monitor, recreate the window unowned and `WS_EX_TOPMOST`.
+  - It answers `WM_NCHITTEST` with `HTTRANSPARENT` and `WM_MOUSEACTIVATE` with `MA_NOACTIVATE`, so the mouse reaches the game.
+  - **`HTTRANSPARENT` only passes input to windows of the same thread**, so create the window on the game window's thread. Under WineD3D (Samorost 2), the frame arrives on the renderer's command thread, which has no message pump. A window created there made the game "not responding" and ignored clicks. The fix (OGL3D-SR `flato3d` branch) creates it from a message posted to the game window's thread (picked up by a `WH_GETMESSAGE` hook) and uses only asynchronous calls across threads (`ShowWindowAsync`, `SWP_ASYNCWINDOWPOS`, posted `WM_CLOSE`).
+- **The SR DLLs measure the window themselves.** They do it also from a window procedure they subclass, so on the game's DPI-unaware thread. They got DPI-virtualized sizes, and the weave covered only part of the window. Fix: patch the `user32` imports of every module loaded from the SR runtime folders, so that each geometry call runs per-monitor aware:
+
+```cpp
+struct PhysicalDpiScope {   // this thread per-monitor aware for one call: window coordinates in physical pixels
+    HANDLE prev = nullptr;
+    PhysicalDpiScope()  { if (SetThreadCtx()) prev = SetThreadCtx()((HANDLE)-4 /* PER_MONITOR_AWARE_V2 */); }
+    ~PhysicalDpiScope() { if (prev && SetThreadCtx()) SetThreadCtx()(prev); }
+};
+BOOL WINAPI Phys_GetClientRect(HWND h, LPRECT r) { PhysicalDpiScope s; return GetClientRect(h, r); }
+// ... same for GetWindowRect, ClientToScreen, ScreenToClient, MonitorFromWindow, GetMonitorInfoA/W,
+//     EnumDisplayMonitors, EnumDisplaySettingsA/W, GetSystemMetrics
+
+// for each loaded module whose path contains \simulated reality\, \spatiallabs\ or \leiasr\ :
+//     rewrite its user32.dll import slots (by name, OriginalFirstThunk) to the Phys_ versions
+```
+
+  Preload the runtime DLLs and patch **before** creating the weaver, then patch again right after it (it loads more DLLs). The source is OGL3D-SR [`src/present.cpp`](https://github.com/nautymac/OGL3D-SR/blob/main/src/present.cpp) (`PatchSrModules`).
+- **The weaver fills an area the size of one input view.** Upscale each eye to the window size first: an input `2 × windowW` by `windowH`, per-eye width `windowW`. Weaving the game-resolution views directly left the rest of the window unwoven.
+
+Verified on Amnesia at 1920 × 1080, DPI-unaware: full-screen weave at 3840 × 2160 with 2× UI. It was checked with a screen capture from a DPI-aware process (`CopyFromScreen`) and by eye on the panel.
+
+### A.13.5 Teardown on threads you don't control
+
+- **Retire weavers to a cleanup thread.** In Azahar-SR, emulation stops on the emulation thread while the GUI thread waits for it. A DX11 weaver's `destroy()` waits for its own processing threads, and those talk to the window's thread, so destroying the weaver there deadlocked the exit (pitfall #20). The fix keeps a list of retired weavers, served by one detached thread that destroys them. When no weaver is live, that thread also calls `SRContext::deleteSRContext`, which turns the eye-tracking camera off while the app stays open. A restart re-creates the context.
+
+```cpp
+void CleanupLoop() {                      // one detached thread, started on the first Retire()
+    for (;;) {
+        std::vector<SR::IDestroyable*> weavers;
+        { std::unique_lock lock{g.mutex};
+          g.retired_cv.wait(lock, [] { return !g.retired.empty(); });
+          weavers.swap(g.retired); }
+        for (auto* w : weavers) { try { w->destroy(); } catch (...) {} }
+        std::scoped_lock lock{g.mutex};
+        if (g.ctx && !g.gl_weaver && !g.gl_dropped && !dx.weaver && g.retired.empty()) {
+            try { SR::SRContext::deleteSRContext(g.ctx); } catch (...) {}
+            g.ctx = nullptr; g.lens = nullptr;   // the lens hint died with the context (A.10)
+        }
+    }
+}
+// Stop path (caller holds g.mutex): lens off first, then Retire(dx.weaver); dx.weaver = nullptr;
+```
+
+- **A GL weaver whose context isn't current on the stopping thread: drop it, don't destroy it.** Its GL objects belong to the presentation context. Keep the SR context too while a dropped GL weaver may still use it. The camera then stays on until the process exits, which is acceptable; a crash is not.
+- **Bridge DLLs.** When the host can't link the proprietary SDK (Azahar is GPL) or uses another CRT (Xenia is `/MT`), put the SDK in a small MSVC bridge DLL with a C API. Examples: `AzSr_Weave` / `AzSr_Dx11Weave` / `AzSr_Stop`, and `xenia3d_sr_weave`. The bridge delay-loads the runtime (A.3), and the host loads the bridge with `LoadLibrary`. This is the same shape as B.1's C-ABI shim.
+
+### A.13.6 Diagnostics and testing
+
+- **The SR platform keeps per-application logs** under `C:\ProgramData\Simulated Reality\Applications\<app>\Log`: lens enable/disable, "weaving is (not) needed", occlusion. `AQAUserPS.exe` reports that it "occludes" every game; that is harmless.
+- **Log one line per stage**: context created, weaver created, first woven frame (with sizes), lens on/off, probe answered (A.13.1), back buffer differing from the window client (pitfall #23). A user's log then shows where it stopped.
+- **Test remotely in SBS.** A woven picture is unreadable over remote desktop or streaming, and in screenshots viewed anywhere but the panel. When you or a tester judge the picture remotely, switch the output to plain SBS, and switch weaving back on at the panel. Automated checks should look at the pre-weave SBS frame, not the woven screen.
+- **Verify presentation with a capture taken from outside**: a DPI-aware `CopyFromScreen` or DXGI desktop duplication. In-DLL probes see what you rendered, not what the compositor shows; a DPI-unaware capture shows a scaled picture.
 
 ---
 
@@ -1454,6 +1681,33 @@ The host engine is unchanged across all three cases. Whether `leiasr_shim.dll` w
 
 The shim build is fast (~3 s incremental on a warm tree). For most edits to the host engine it doesn't rebuild at all. The pattern scales — if you later want a DX backend in the same engine, you add a `dx_weaver_init/weave/shutdown` set of exports to the same shim, no new architecture.
 
+### Hosting the GL weaver inside an `opengl32.dll` proxy
+
+*Added in the nautymac fork, from OGL3D-SR ([`src/stereo.cpp`](https://github.com/nautymac/OGL3D-SR/blob/main/src/stereo.cpp), `GlStateGuard`). The `api-proxy-stereo` skill covers the proxy itself.*
+
+When the weave runs inside a proxy that replaces `opengl32.dll` for a game you don't own, three things differ from an engine that owns its GL state.
+
+**1. The weaver's own GL calls go through your hooks.** The SR GL weaver imports `opengl32.dll`, and in the game's folder that is you.
+- Run `weave()` with your per-thread context pointer cleared, so every hooked entry point is a pure pass-through while it runs: no shader injection, no draw duplication, no state tracking. Restore the game's tracked state afterwards.
+- Likewise, mark the weaver's creation (`CreateGLWeaver`, where it compiles its shaders) so your shader rewriter leaves those programs alone (`t_ownShaders` on the `flato3d` branch).
+
+**2. The game's frame-end state reaches the weaver's full-screen pass.** A game can end its frame with blending still on. Broken Age ended some shots with `glBlendFunc(GL_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA)`. The woven image was then multiplied into the previous one every frame, and the screen ran to black within frames: "black until I click". An additive leftover made it very bright instead. The eyes themselves were bright the whole time.
+
+The guard around `weave()` (and around your overlay) therefore *sets* state as well as saving it:
+- It disables blend, depth test, cull face, scissor, stencil, `GL_FRAMEBUFFER_SRGB`, colour logic op, alpha-to-coverage, rasterizer discard, clip distances 0–2, and alpha test in compatibility contexts.
+- It forces `glPolygonMode(GL_FILL)`, all colour mask bits, and a full viewport.
+- It restores everything afterwards: per-enable on core contexts, `glPushAttrib(GL_ALL_ATTRIB_BITS)` / `glPushClientAttrib` on compatibility contexts.
+- Push and pop with framebuffer 0 bound: `glPopAttrib` restores the draw/read buffers *of the bound framebuffer*.
+- Rasterizer discard is in no attrib group; save it yourself.
+
+Logging what each frame ends with ("frame N ends with blend 1 (0x306, 0x303) …", changes only) found this in minutes.
+
+**3. Clip control.** WineD3D (D3D9/10/11 on OpenGL) keeps the D3D convention: `glClipControl(GL_UPPER_LEFT, GL_ZERO_TO_ONE)`. The weaver's and overlay's full-screen passes are written for GL's convention and came out **upside down**. If `GL_CLIP_ORIGIN` / `GL_CLIP_DEPTH_MODE` aren't `GL_LOWER_LEFT` / `GL_NEGATIVE_ONE_TO_ONE`, set them for the weave and put them back afterwards. This is on OGL3D-SR's `flato3d` branch. Before it, the whole woven Huntdown picture was upside down (Door Kickers: Action Squad, only the overlay); with it, Huntdown's title wove upright.
+
+Two related GL notes from the same proxy:
+- **Don't present a second GL window** from a DPI-unaware process to get a native-resolution weave. It crashed in NVIDIA's DXGI-based GL present. Share the eyes into D3D11 with `WGL_NV_DX_interop2` and use the DX11 weaver (A.13.4).
+- The GL weaver draws into **the bound draw framebuffer at the current viewport**. Bind framebuffer 0 (or your own back-buffer stand-in) and set the viewport to the window just before `weave()`. Never leave the game's last FBO bound.
+
 ## B.2 DirectX 12
 
 | Thing | Concrete value |
@@ -1609,6 +1863,16 @@ leiaSRWeaver.weave(d3dTex, int(sbsW), int(sbsH), DXGI_FORMAT_R8G8B8A8_UNORM,
 | Output | Whatever RTV is bound when you call `Weave()` |
 | Status | Wired against a real integration ([UU3D `Flat3DCompositorD3D11.cpp`](https://github.com/oneup03/UU3D/blob/flat3d-afw/src/mods/vr/flat3d/Flat3DCompositorD3D11.cpp)) and building; **weave not yet confirmed on a panel** |
 
+**The raw-SDK DX11 weaver is confirmed weaving on a panel** (nautymac fork, SR
+Platform 1.34.10, Acer SpatialLabs). This uses `SR::CreateDX11Weaver(SRContext*,
+ID3D11DeviceContext*, HWND, IDX11Weaver1**)` directly, not SR-lib's facade, so
+the UU3D status above is unchanged. Integrations: geo-11_SR SRWeave (weaving
+geo-11's SBS back buffer in Unity, DX11 and UE4 games, x64 and x86), OGL3D's
+upscale mode (GL eyes shared into D3D11), and the Vulkan → D3D11 interop of VK3D
+and Azahar-SR (B.4). Per frame: `setInputViewTexture(srv, eyeW, eyeH, format)`
+only when the input changes (A.5), then bind the output RTV, set a full viewport
+and scissor, `weave()`, and restore the game's context state.
+
 Simpler than DX12 (B.2): the DX11 weaver holds its own device context, so there
 is no per-frame command-list / viewport / scissor handshake. Set the input once,
 then bind + `Weave()` each frame.
@@ -1640,11 +1904,93 @@ Differences from DX12 worth knowing:
 - The viewport still matters, for the same reason as B.2.2 — just set it on the
   device context instead of a command list.
 
-## B.4 Vulkan / etc.
+## B.4 Vulkan (through D3D11 interop)
 
-*(Same template as B.2 — list weaver type, create function, header, link target, texture handle, output destination, filter requirements, and any delay-load DLLs unique to that backend. The shared concerns in Part A don't change.)*
+*Added in the nautymac fork. Verified on an Acer SpatialLabs panel (SR Platform 1.34.10) in two integrations that are not public: **VK3D** (a `vulkan-1.dll` proxy) and **Azahar-SR** (the 3DS emulator's Vulkan renderer, `vk_sr_weaver.cpp` + a bridge DLL).*
 
-**Vulkan producers, until this section is filled in.** If the stereo pair comes from a Vulkan renderer (often as a 2-layer image from `VK_KHR_multiview` — see `vulkan-multiview-stereo`) and the SR SDK you vendor offers no Vulkan weaver, the working pattern is D3D interop: create the full-SbS (2W × H) texture and a fence on the D3D11/D3D12 side, import them into Vulkan (`VK_KHR_external_memory_win32` with `D3D11_TEXTURE_BIT`, the fence as a timeline semaphore via `D3D12_FENCE_BIT`), copy layer 0 → left half and layer 1 → right half, signal value *n*, then wait for *n* and weave on the D3D side with B.2/B.3 unchanged. VKS3D's 3D Vision path (`src/present_nv3d.cpp` in ThreeDeeJay/VKS3D) is a public example of exactly this hand-off (`vulkan-multiview-stereo` §8.2). Whether a given SR SDK release ships a native Vulkan weaver has not been verified here.
+The SR SDK 1.34.10 has **no Vulkan weaver**: its `sr/weaver/` headers are GL, DX9, DX10, DX11 and DX12 only. So the Vulkan frame goes to the DX11 weaver through shared resources, and the woven picture comes back into the swapchain image. All synchronisation stays on the GPU.
+
+| | |
+|---|---|
+| Weaver type | `SR::IDX11Weaver1` (B.3), on your own D3D11 device |
+| Create function | `SR::CreateDX11Weaver(SRContext*, ID3D11DeviceContext*, HWND, IDX11Weaver1**)` |
+| D3D11 device | Created on the **same adapter** as the Vulkan device: match `VkPhysicalDeviceIDProperties::deviceLUID` (needs `deviceLUIDValid`) against `DXGI_ADAPTER_DESC::AdapterLuid`. Use `ID3D11Multithread::SetMultithreadProtected(TRUE)`, `ID3D11Device5` / `ID3D11DeviceContext4` for fences. |
+| Shared textures | Two D3D11 textures, `D3D11_RESOURCE_MISC_SHARED_NTHANDLE \| D3D11_RESOURCE_MISC_SHARED`, NT handles from `IDXGIResource1::CreateSharedHandle`. **Input** = the SBS frame (SRV); **output** = swapchain-sized (RTV). |
+| Into Vulkan | `VkExternalMemoryImageCreateInfo{VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT}` on the image, then `VkImportMemoryWin32HandleInfoKHR` + `VkMemoryDedicatedAllocateInfo` on the allocation, memory type from `vkGetMemoryWin32HandlePropertiesKHR` ∩ the image's requirements. |
+| GPU sync | `ID3D11Device5::CreateFence(0, D3D11_FENCE_FLAG_SHARED)` → NT handle → a Vulkan **timeline** semaphore imported with `VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_FENCE_BIT` (an alias of `…_D3D12_FENCE_BIT`) via `vkImportSemaphoreWin32HandleKHR`. |
+| Device extensions | `VK_KHR_external_memory(_win32)`, `VK_KHR_external_semaphore(_win32)` (the non-win32 halves are core in 1.1), plus `get_memory_requirements2` and `dedicated_allocation` before 1.1; the `timelineSemaphore` feature (core in 1.2, `VK_KHR_timeline_semaphore` before). |
+| Output destination | the bound RTV (the shared output texture), then copied into the swapchain image on the Vulkan side |
+
+**Enabling features in a device you don't create** (a proxy layer): if the app's
+`VkDeviceCreateInfo::pNext` already holds `VkPhysicalDeviceVulkan12Features`, set
+`timelineSemaphore = VK_TRUE` **in that struct**. Chaining your own
+`VkPhysicalDeviceTimelineSemaphoreFeatures` next to it is invalid. Only append
+your own struct when neither is present. Turn on only features the physical
+device reports.
+
+Per frame, at `vkQueuePresentKHR` (VK3D) or the renderer's present step
+(Azahar). `v` is the timeline's last value, so the steps use `v+1`, `v+2`, `v+3`:
+
+```
+Vulkan submit A   waits: the app's present semaphores + timeline ≥ v     (D3D11 and the last copy-back are done)
+                  copy the SBS frame into the shared INPUT image
+                  barrier: release INPUT to VK_QUEUE_FAMILY_EXTERNAL
+                  signals: timeline = v+1
+D3D11             ctx4->Wait(fence, v+1)
+                  OMSetRenderTargets(OUTPUT rtv); RSSetViewports(full)
+                  weaver->setInputViewTexture(inputSrv, eyeW, eyeH, fmt)  (only when it changed, A.5)
+                  weaver->weave()            (on failure: CopyResource(OUTPUT, INPUT) so SBS still shows)
+                  ctx4->Signal(fence, v+2); Flush()      ← ALWAYS, even when weave() threw
+Vulkan submit B   waits: timeline ≥ v+2 (+ the acquire semaphore if you acquire here)
+                  barrier: acquire OUTPUT from VK_QUEUE_FAMILY_EXTERNAL
+                  copy OUTPUT into the swapchain image → PRESENT_SRC
+                  barrier: release OUTPUT to VK_QUEUE_FAMILY_EXTERNAL
+                  signals: your present semaphore + timeline = v+3
+vkQueuePresentKHR waits on your present semaphore instead of the app's
+```
+
+Things that cost time:
+
+- **Signal the fence on every path.** The Vulkan side waits for that value before copying the output. A weave that throws and skips the `Signal` hangs the queue for good.
+- **Transfer queue-family ownership** to and from `VK_QUEUE_FAMILY_EXTERNAL` on both shared images, every frame. Keep them in `VK_IMAGE_LAYOUT_GENERAL` while D3D11 owns them; both start out owned by D3D11.
+- **Keep a CPU fallback** for devices without timeline or external-semaphore support: a `D3D11_QUERY_EVENT` polled after `Flush`, and the Vulkan submit's own fence. It stalls every frame. VK3D has one, but it was never exercised, because the test GPU always got GPU sync. Log which mode you got ("SR sync: GPU" / "SR sync: CPU").
+- **Input width**: both integrations hand `setInputViewTexture` the per-eye width of a `2 × eyeW` input and weave correctly (the A.1 field note).
+- **Overlay and cursor go into the SBS input before the hand-off.** The weave consumes the whole picture, so anything drawn afterwards is not woven.
+
+Measured: Azahar (Super Mario 3D Land with a 60 fps patch, 9× internal resolution) reached 60 fps at full emulation speed with ~40 % GPU through this path. The same emulator's OpenGL path with the GL weaver already ran below full emulation speed at 6× and managed 23 fps at 9×. VK3D wove Lara Croft GO (D3D9 → DXVK → Vulkan) at 60 fps with GPU sync. Tested on an RTX 4080 laptop GPU. The interop has not been tried on AMD or Intel.
+
+VKS3D's 3D Vision path (`src/present_nv3d.cpp` in ThreeDeeJay/VKS3D) is a public example of the same hand-off to a D3D consumer (`vulkan-multiview-stereo` §8.2). It uses a D3D12-side fence; the D3D11 fence above works the same way.
+
+## B.5 Direct3D 9
+
+*Added in the nautymac fork, from tridef3d-win11-injector [`srweave/src/dx9.cpp`](https://github.com/nautymac/tridef3d-win11-injector/blob/master/srweave/src/dx9.cpp): weaving TriDef 3D's SBS output in 32-bit D3D9 games. Weaving was confirmed by eye on the panel in Binary Domain. Left 4 Dead reached its first woven frame and survived two in-game resolution changes (`Reset`).*
+
+| | |
+|---|---|
+| Weaver type | `SR::IDX9Weaver1` |
+| Create function | `SR::CreateDX9Weaver(SRContext*, IDirect3DDevice9*, HWND, IDX9Weaver1**)` |
+| Header | `<sr/weaver/dx9weaver.h>` |
+| Input | `setInputViewTexture(IDirect3DTexture9*, int width, int height, D3DFORMAT, bool isSRGB)`: a `D3DUSAGE_RENDERTARGET`, `D3DPOOL_DEFAULT` texture (fall back to `D3DFMT_A8R8G8B8` if the back buffer's format is refused) |
+| Output | the render target bound when `weave()` runs |
+| sRGB | `setOutputSRGBWrite(bool)` plus the `isSRGB` input flag |
+| Device loss | `invalidateDeviceObjects()` before `IDirect3DDevice9::Reset`, `restoreDeviceObjects()` after a successful one; drop your own `D3DPOOL_DEFAULT` texture and state block too |
+| HWND | the swap chain's `hDeviceWindow` (`GetSwapChain(0)` → `GetPresentParameters`), falling back to the foreground window |
+
+Per frame, at `Present` (device or swap chain):
+
+```
+GetBackBuffer(0) → StretchRect(backBuffer → sbsTexture surface, D3DTEXF_POINT)
+setInputViewTexture(sbsTexture, w / 2, h, fmt, srgb)        // once per texture (A.5)
+stateBlock(D3DSBT_ALL)->Capture(); save RT0, depth surface, viewport
+SetRenderTarget(0, backBuffer); SetDepthStencilSurface(nullptr); full viewport
+ZENABLE / ZWRITEENABLE / SCISSORTESTENABLE / STENCILENABLE = FALSE
+BeginScene()            // may fail harmlessly if the game left a scene open: still weave, EndScene only if it began
+weaver->weave()
+EndScene(); restore RT0, depth surface, viewport; stateBlock->Apply()
+original Present
+```
+
+Finding the device to hook when a wrapper owns it is covered in A.13.2 (TriDef's temporary device refused `GetSwapChain(0)`; the real device was found by its vtable).
 
 ---
 
