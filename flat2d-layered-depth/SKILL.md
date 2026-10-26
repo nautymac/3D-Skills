@@ -139,8 +139,10 @@ The draw order is not the order on screen. Engines draw layers into off-screen t
 | Several backgrounds at one depth | Same-atlas layers grouped together | `group = draw`, `order_curve = 0.5` |
 | Diagonal line across the screen | Triangles of a quad shifted differently | Per-quad shift |
 | Text lines slant | Glyph scratch target | One layer per use |
+| Text slants under `order`, no scratch target involved | The glyphs are one draw into the scene target (GameMaker), and the group spread by primitive index walks along the line | Prefer `feet` for such games; unsolved under `order` |
 | A character far back | Its texture changed, so it became a new group at the end | Place unknown groups after the previous known one |
 | Character floats in front of the floor (side-scroller) | Floor drawn first = farther | `feet` for adventures; unsolved for side-scrollers with `order` |
+| Whole room in front of the character standing before it (`feet`) | The room is drawn as tall narrow pieces reaching below the screen; each stands at its off-screen bottom edge, nearer than anything on screen | `plane_tall` above the characters' height (Home: 1, half the screen) |
 | Right eye has different colours | LUT strip made stereo | Strip exclusion |
 | One eye misses parts (`0x8cd7`) | Right-eye view of a non-immutable clone | Immutable clones, incl. multisample |
 | Unity 2D: both eyes identical | Lit sprites as composites + viewport per light pass | Lit-sprite rule + `screen_batch = 0` |
@@ -163,6 +165,7 @@ When the figures arrive already merged into one picture (video panels) and they 
 | Flash-like fixed function (Machinarium) | `feet` with the fixed-function grouping | `-ogl` switch injected; bitmap fills from client arrays; walk-behind rule |
 | Adobe AIR (Samorost 2) | `feet`, `plane_tall = 0.12` | Pictures drawn in tall pieces |
 | Custom D3D11 (Braid, Anniversary Edition) | template `order` | Needed a loader shim (`wrapper-injection` §2.2) |
+| GameMaker Studio 2, side-view rooms (Home) | `feet`, `plane_tall = 1` | Rooms are one draw of tall pieces reaching below the screen. `order` would slant dialogue text (all glyphs in one draw) |
 | Comic panels as video (FRAMED) | `order`, repeats share a layer, `screen_batch = 0`, silhouette | Inside a panel it is kind 4 |
 
 Known unsolved: characters floating in front of the floor in side-scrollers under `order`; coarse depth steps inside low-resolution caches; bright figures inside merged pictures.
