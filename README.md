@@ -38,6 +38,16 @@ Claude Code, per project: copy the same folders into `.claude/skills/` inside th
 
 Once installed, the agent loads a skill automatically when a task matches its description, or you can invoke one directly with `/output3d`, `/dynamic3d`, `/extraoutput3d`, `/leiasr-integration`, `/skybox-stereo-depth`, `/rt64-stereo-3d`, `/vulkan-multiview-stereo`, `/flat2d-layered-depth`, `/wrapper-injection`, `/windows-hang-diagnosis`, `/api-proxy-stereo`, or `/emulator-stereo`.
 
+## Working rule: check the skills before diagnosing a 3D bug
+
+Automatic loading by description is not enough during a diagnosis: the agent tends to start testing hypotheses straight away. Before diagnosing or fixing a stereo bug (one eye different from the other, wrong depth, flicker, one eye black or stale), do these three things first and report the result in a line or two:
+
+1. **Read the matching skill items.** The pitfall list and checklist of the skill for that path: `vulkan-multiview-stereo` (pitfalls and §12.1) for multiview renderers, `wrapper-injection` and `windows-hang-diagnosis` for injected wrappers, `flat2d-layered-depth` for flat 2D games, and so on.
+2. **Search the project itself.** Its code comments, docs and notes for the pass, shader or setting the symptom points at: shader hashes, environment variable descriptions, phrases such as "rebuild positions from depth".
+3. **Say what applies.** "Applies: ..., nothing on: ..." and what will be checked first, then proceed. When nothing applies, say so; once the cause is found, add the general lesson back to the skill (SKILL.md section, README row, frontmatter description).
+
+Why: in the Uncharted PS4 port a right-eye shadow bug took about ten test runs of hypotheses and a new dump tool, while the port's own code comment already named the sun-shadow pass that rebuilds positions from depth; read first, it was a two-or-three-run fix (now `vulkan-multiview-stereo` §12.1, item 10).
+
 ## Reference implementations
 
 The skills link to these public repositories for complete, working code:
