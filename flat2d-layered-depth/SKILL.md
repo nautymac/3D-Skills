@@ -32,7 +32,7 @@ You need each sprite's screen rectangle to decide its depth. A vertex shader see
 
 1. Rename every output of the game's vertex shader (`foo` → `s3d_v_foo`). GLSL reserves names with `__`, so an output that starts with `_` needs another prefix (LÖVE's shaders do this).
 2. Generate a GS that takes `triangles`, computes the triangle's bounding box in NDC, decides a per-vertex shift, and re-emits the vertices with the outputs **under their original names**. The fragment shader then links unchanged.
-3. Pass array outputs (`ffp_varying_texcoord[8]`, which needs `GL_ARB_arrays_of_arrays` below GLSL 4.30), interface blocks, and the legacy built-ins (`gl_FrontColor`, `gl_TexCoord` …) in compatibility contexts.
+3. Pass array outputs (`ffp_varying_texcoord[8]`, which needs `GL_ARB_arrays_of_arrays` below GLSL 4.30), interface blocks, and the legacy built-ins (`gl_FrontColor`, `gl_TexCoord` …) in compatibility contexts. Look for them inside macros too: MojoShader (FNA) writes them only through `#define vs_oT0 gl_TexCoord[0]`. A scan that skips preprocessor lines passes nothing on, and the screen goes black (with stereo off too). Count the bodies of the macros the code uses, not every macro, or a core-profile shader turns into a compatibility one.
 4. Only touch triangles with `w == 1` on all three vertices. Perspective geometry keeps the normal stereo path.
 5. Shift **per quad, not per triangle**: `floor(gl_PrimitiveIDIn / 2)`. If the two triangles of a full-screen quad get different depths, a diagonal line runs across the screen.
 
@@ -84,8 +84,9 @@ Depth runs from 0 (screen) to `depth_top` (farthest). `depth_screen` moves the w
   - `group = texture`: the group ends when the program or the texture on unit 0 changes. Grouping by program alone made one fixed-function game a single layer.
   - `group = draw`: one draw is one layer. Unity draws each parallax plane separately from the same atlas.
 - **Depth from position.** Each group's depth comes from its position in the **composed** frame (§4): the first group is farthest and the last is at the screen. `order_curve < 1` (0.5) gives more of the range to the far layers when many background layers would otherwise bunch together.
+- **Low-resolution targets: shift by whole pixels.** A game that draws at 432x240 and scales up shows every fraction of a pixel: with a fractional per-eye shift the two eyes round a sprite at a fractional scroll position differently, and a parallax layer's disparity flips by a pixel while it scrolls (the tiles sway). Round the shift to whole pixels of the target (half the viewport width per NDC unit) in the geometry shader, and drop the spread below, which is less than a pixel and would round differently per sprite.
 - **Spread inside a group by primitive index.** A batch is drawn back to front, so its first sprite is the farthest. Spread at most ~80 % of the group's slot, per quad.
-- **Keep depths stable over time.** Smooth each group's depth per identity (program + nth group of that program). A group missing from the last layout (an animated sprite that switched texture) goes right after the previous known group, not to the end. Restart smoothing after a group has been absent for 3 frames.
+- **Keep depths stable over time.** Smooth each group's depth per identity (program + nth group of that program). A group missing from the last layout (an animated sprite that switched texture) goes right after the previous known group, not to the end. Restart smoothing after a group has been absent for 3 frames. Depth is a place among the places, so a group that comes and goes (a blinking text cursor, an object scrolling into view) moves every other layer; keep the place count at its recent peak and let it shrink only after a few seconds, or at once when it drops by more than a couple (another scene). Without that, Axiom Verge 2's layers glided back and forth while walking.
 
 ### 3.3 UI stays at the screen
 
@@ -93,7 +94,7 @@ Many engines change scissor or viewport between the world and the UI. Count **ba
 
 Two traps:
 
-- A scissor/viewport call only starts a batch if the **next draw goes to the same framebuffer**. Engines reset the scissor for every pass, and counting those calls put a whole scene in the "UI" batch.
+- A scissor/viewport call only starts a batch if the **next draw goes to the same render target**: the framebuffer *and* its colour attachment. Engines reset the scissor for every pass, and counting those calls put a whole scene in the "UI" batch. FNA renders every target through one framebuffer object and swaps its attachment, so comparing framebuffer numbers alone did the same (disparity 0 everywhere).
 - Games and translation layers that set a viewport or scissor for **every** pass (Unity through WineD3D sets it between 2D-light passes; FRAMED sets a scissor per draw) need `screen_batch = 0`, i.e. off.
 
 ## 4. Follow the composition, not the draw list
@@ -103,7 +104,7 @@ The draw order is not the order on screen. Engines draw layers into off-screen t
 - **Root:** the target of the last draw that used a program; if there is none, the last event. Do not root at trailing blits, and never at a bloom buffer that a later rule happened to prefer.
 - **Composites:** a draw that samples a stereo render target is a composite. Expand it into the layers of the target it samples, in place, so a city backdrop drawn after a cache still sits behind it on screen.
 - **Layer caches:** some games draw the whole level into a low-resolution mono buffer and then stretch it to the screen (Door Kickers: ~416×234 inside a 1024² target). Promote such a framebuffer to stereo when a draw into a stereo target samples it, and only if it was drawn into this frame. Otherwise upload and clear buffers get promoted and every sprite atlas becomes a "composite". Scale the shift inside it by the cache-to-screen ratio (from its scissor/viewport, or a per-game `cache_scale`). Depth inside a low-resolution cache comes in whole cache pixels, so steps are coarse.
-- **Track what aliases what.** Texture views (`glTextureView`, which is how translation layers express SRVs/RTVs) of a stereo texture need the same view of its right-eye clone. Clones need immutable storage, including `glTexStorage2DMultisample`. `glCopyImageSubData` and blits must be mirrored to the clones. Follow copy chains. Compare targets by the texture they view, not by FBO id.
+- **Track what aliases what.** Texture views (`glTextureView`, which is how translation layers express SRVs/RTVs) of a stereo texture need the same view of its right-eye clone. Clones need immutable storage, including `glTexStorage2DMultisample`. `glCopyImageSubData` and blits must be mirrored to the clones. Follow copy chains. Compare targets by the texture they view, not by FBO id. Key the composition order (events, sources, scratch targets) by framebuffer + colour attachment as well: under FNA's single framebuffer object every target looked like one scratch target, cleared and redrawn many times a frame, and the scene collapsed into one layer. Keep a framebuffer's first attachment under its own number so engines with one target per framebuffer are unaffected, and give later attachments numbers of their own; a sampled texture whose framebuffer has moved on is found through the target it was last drawn into as.
 - **Only units the shader reads count.** Engines and translation layers leave old render targets bound. Take the sampled units from the program's sampler uniforms (or `texture[n]` in ARB fragment programs). Otherwise a leftover target makes every sprite look like a composite.
 
 ### 4.1 Exclusions that are needed in practice
@@ -139,6 +140,7 @@ The draw order is not the order on screen. Engines draw layers into off-screen t
 | Several backgrounds at one depth | Same-atlas layers grouped together | `group = draw`, `order_curve = 0.5` |
 | Diagonal line across the screen | Triangles of a quad shifted differently | Per-quad shift |
 | Text lines slant | Glyph scratch target | One layer per use |
+| Layers sway while scrolling, fine when still | Fractional per-eye shift in a low-resolution target; layer count changing as objects scroll in and out | Whole-pixel shifts; keep the layer count at its recent peak (§3.2) |
 | Text slants under `order`, no scratch target involved | The glyphs are one draw into the scene target (GameMaker), and the group spread by primitive index walks along the line | Prefer `feet` for such games; unsolved under `order` |
 | A character far back | Its texture changed, so it became a new group at the end | Place unknown groups after the previous known one |
 | Character floats in front of the floor (side-scroller) | Floor drawn first = farther | `feet` for adventures; unsolved for side-scrollers with `order` |
@@ -148,6 +150,8 @@ The draw order is not the order on screen. Engines draw layers into off-screen t
 | Unity 2D: both eyes identical | Lit sprites as composites + viewport per light pass | Lit-sprite rule + `screen_batch = 0` |
 | Whole scene stuck far away, near max separation | It is a 3D game (kind 1) | Flat depth off, auto-convergence on |
 | Few draws, none into the scene buffer | One finished picture (kind 4) | AI 2D→3D |
+| Black screen once the wrapper is in, also with stereo off; fine without it | The generated GS passes none of the outputs on: they are built-ins written through macros (MojoShader) | Scan the bodies of the macros the shader uses (§2) |
+| Whole scene at disparity 0 or in one layer; every draw in the trace on the same framebuffer number | One framebuffer object for all render targets (FNA): per-target viewports start UI batches, all targets look like one scratch target | Batches and composition keyed by framebuffer + colour attachment (§3.3, §4) |
 
 ## 7. Merged pictures: the silhouette trick
 
@@ -165,6 +169,7 @@ When the figures arrive already merged into one picture (video panels) and they 
 | Flash-like fixed function (Machinarium) | `feet` with the fixed-function grouping | `-ogl` switch injected; bitmap fills from client arrays; walk-behind rule |
 | Adobe AIR (Samorost 2) | `feet`, `plane_tall = 0.12` | Pictures drawn in tall pieces |
 | Custom D3D11 (Braid, Anniversary Edition) | template `order` | Needed a loader shim (`wrapper-injection` §2.2) |
+| FNA (XNA reimplementation, .NET: Axiom Verge 1 and 2) | OpenGL through `/gldevice:OpenGL` (`wrapper-injection` §2.1), `order`; `order_curve = 0.4` when HUD textures are many layers | One framebuffer object for all targets; MojoShader macros; a low-resolution game buffer (480x270) gives 4 px depth steps on a 1920-wide eye |
 | GameMaker Studio 2, side-view rooms (Home) | `feet`, `plane_tall = 1` | Rooms are one draw of tall pieces reaching below the screen. `order` would slant dialogue text (all glyphs in one draw) |
 | Comic panels as video (FRAMED) | `order`, repeats share a layer, `screen_batch = 0`, silhouette | Inside a panel it is kind 4 |
 

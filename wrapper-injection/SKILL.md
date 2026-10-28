@@ -52,6 +52,8 @@ none of those, but a DLL deeper in the folder does     → probably fine (Samoro
 nothing                                                → warn: the loader will not load
 ```
 
+**.NET games are the exception** (FNA, XNA ports): the runtime maps System32's `version.dll` before SDL2.dll imports it, so the loader never loads although the import is there. FNA draws with OpenGL itself, so the opengl32 proxy alone is enough, once the game is on OpenGL: FNA3D picks Direct3D 11 on Windows. Use the Steam launch option `/gldevice:OpenGL` (FNA's switch). The environment variable `FNA3D_FORCE_DRIVER=OpenGL` works too, but a Steam game started outside Steam restarts through Steam (`SteamAPI_RestartAppIfNecessary`) and loses it; a `steam_appid.txt` next to the exe stops the restart, for tests only. Patching the command line from the proxy (§4) is too late here: opengl32.dll loads only after FNA3D has chosen its driver.
+
 ### 2.2 A forwarding shim for games that import no version.dll
 
 Build a DLL named after a non-KnownDLL the exe does import (`winmm.dll` is the usual candidate because of `timeGetTime`; `dsound.dll`, `dinput8.dll`, `dwmapi.dll` are others). It has two jobs:
@@ -157,6 +159,7 @@ Result in The Messenger: 11 hangs in 19 runs before, none in 10 side-by-side and
 - **Antivirus.** A `version.dll` loader that patches imports looks like malware to cloud heuristics. Windows Defender flagged the x64 loader as `Trojan:Win32/Cloxer`, and a rebuild was flagged again soon after. Offer a per-file Defender exclusion in the installer, and treat "flat, and the loader file is missing" as a quarantine.
 - **GPU.** Shader rewrites were verified on NVIDIA; Intel drivers broke them. On hybrid laptops write `GpuPreference=2;` for the exe under `HKCU\Software\Microsoft\DirectX\UserGpuPreferences`.
 - **Locked files.** DLLs of a running game cannot be replaced. Check for the process before deploying.
+- **Test input.** SDL reads scan codes: synthesized arrows, Home/End, PgUp/PgDn and Insert/Delete need `KEYEVENTF_EXTENDEDKEY`, or the game gets numeric keypad keys. Engines that read virtual-key codes (GameMaker) work either way, which hides the bug.
 
 ## 7. Checklist for a new game
 
