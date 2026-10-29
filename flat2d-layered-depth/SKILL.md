@@ -112,6 +112,7 @@ The draw order is not the order on screen. Engines draw layers into off-screen t
 | Thing | Rule | What went wrong without it |
 |---|---|---|
 | Colour-grading LUT (Unity post-processing, a 1024×32 strip) | A target with one side more than 4× the other is never a layer cache | The LUT became stereo, was shifted in the right eye, and turned the right eye red |
+| Textures the game uploads from the CPU (video Y/U/V planes, sprites) | A texture that receives `glTexSubImage*` is a picture: no right-eye copy, and a framebuffer it is attached to stays mono | Window-shaped video planes got right-eye copies that were never updated; Blasphemous 2's cutscenes turned pink in the right eye (Y near 0, U and V high) |
 | Scratch / glyph targets | A target cleared (with colour) and drawn several times per frame gets one layer per use | Each glyph came one layer nearer, so text lines slanted |
 | Stencil-only clears | Do not count as a scratch restart | The scene clumped into 2-3 layers |
 | The root | Never a scratch target | The scene clumped whenever the HUD was visible |
@@ -126,6 +127,7 @@ The draw order is not the order on screen. Engines draw layers into off-screen t
 - **Disparity map:** per 24-px block, the horizontal offset that best matches the right eye to the left; print the numbers over the dimmed left eye. Positive is behind the screen. Repeating patterns and flat areas give false readings (often at the search limit).
 - **Area masks** for small characters, e.g. measure only purple pixels inside a rectangle.
 - **A good result** (separation 25 %, 3840-wide output, `depth_screen` 0.3): far background +30…60 px, terrain/midground +8…30, characters −10…+10, HUD 0…−20, and the layer order matches what overlaps what.
+- **Per-draw images of both eyes**: when one eye alone goes wrong, save the target after every draw for the left and the right eye side by side and find the first draw where they part (OGL3D `trace_steps`).
 - **Trace one frame**: per draw, write target (stereo/mono), program and its GS, sampled textures (and whether they have a right-eye copy), group, slot and depth. Also log the layout line (`root fbX, scratch targets …, composites fbA<fbB`). Most bugs show up as a wrong classification in that trace.
 
 ## 6. Symptoms
@@ -146,6 +148,7 @@ The draw order is not the order on screen. Engines draw layers into off-screen t
 | Character floats in front of the floor (side-scroller) | Floor drawn first = farther | `feet` for adventures; unsolved for side-scrollers with `order` |
 | Whole room in front of the character standing before it (`feet`) | The room is drawn as tall narrow pieces reaching below the screen; each stands at its off-screen bottom edge, nearer than anything on screen | `plane_tall` above the characters' height (Home: 1, half the screen) |
 | Right eye has different colours | LUT strip made stereo | Strip exclusion |
+| Right eye pink only in video cutscenes | Right-eye copies of the CPU-uploaded video planes | Uploaded textures are pictures (§4.1) |
 | One eye misses parts (`0x8cd7`) | Right-eye view of a non-immutable clone | Immutable clones, incl. multisample |
 | Unity 2D: both eyes identical | Lit sprites as composites + viewport per light pass | Lit-sprite rule + `screen_batch = 0` |
 | Whole scene stuck far away, near max separation | It is a 3D game (kind 1) | Flat depth off, auto-convergence on |
