@@ -152,6 +152,7 @@ The draw order is not the order on screen. Engines draw layers into off-screen t
 | One eye misses parts (`0x8cd7`) | Right-eye view of a non-immutable clone | Immutable clones, incl. multisample |
 | Unity 2D: both eyes identical | Lit sprites as composites + viewport per light pass | Lit-sprite rule + `screen_batch = 0` |
 | Whole scene stuck far away, near max separation | It is a 3D game (kind 1) | Flat depth off, auto-convergence on |
+| Auto-convergence pulses several times a second on a scene of nearly one depth | At the right convergence the scene matches at offset 0, counts as 2D, and stray edges give a wrong near depth | Leave the convergence alone when most blocks are on the screen plane (`dynamic3d` §4.7) |
 | Few draws, none into the scene buffer | One finished picture (kind 4) | AI 2D→3D |
 | Black screen once the wrapper is in, also with stereo off; fine without it | The generated GS passes none of the outputs on: they are built-ins written through macros (MojoShader) | Scan the bodies of the macros the shader uses (§2) |
 | Whole scene at disparity 0 or in one layer; every draw in the trace on the same framebuffer number | One framebuffer object for all render targets (FNA): per-target viewports start UI batches, all targets look like one scratch target | Batches and composition keyed by framebuffer + colour attachment (§3.3, §4) |
@@ -174,6 +175,7 @@ When the figures arrive already merged into one picture (video panels) and they 
 | Custom D3D11 (Braid, Anniversary Edition) | template `order` | Needed a loader shim (`wrapper-injection` §2.2) |
 | FNA (XNA reimplementation, .NET: Axiom Verge 1 and 2) | OpenGL through `/gldevice:OpenGL` (`wrapper-injection` §2.1), `order`; `order_curve = 0.4` when HUD textures are many layers | One framebuffer object for all targets; MojoShader macros; a low-resolution game buffer (480x270) gives 4 px depth steps on a 1920-wide eye |
 | GameMaker Studio 2, side-view rooms (Home) | `feet`, `plane_tall = 1` | Rooms are one draw of tall pieces reaching below the screen. `order` would slant dialogue text (all glyphs in one draw) |
+| SteamWorld (own SDL2/OpenGL engine) | Dig: `order`. Dig 2, Heist: flat depth off, auto-convergence | Dig 2 and Heist look 2D but place sprites at different z under a perspective camera (kind 1) |
 | Comic panels as video (FRAMED) | `order`, repeats share a layer, `screen_batch = 0`, silhouette | Inside a panel it is kind 4 |
 
 Known unsolved: characters floating in front of the floor in side-scrollers under `order`; coarse depth steps inside low-resolution caches; bright figures inside merged pictures.
