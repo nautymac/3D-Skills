@@ -54,6 +54,8 @@ nothing                                                → warn: the loader will
 
 **.NET games are the exception** (FNA, XNA ports): the runtime maps System32's `version.dll` before SDL2.dll imports it, so the loader never loads although the import is there. FNA draws with OpenGL itself, so the opengl32 proxy alone is enough, once the game is on OpenGL: FNA3D picks Direct3D 11 on Windows. Use the Steam launch option `/gldevice:OpenGL` (FNA's switch). The environment variable `FNA3D_FORCE_DRIVER=OpenGL` works too, but a Steam game started outside Steam restarts through Steam (`SteamAPI_RestartAppIfNecessary`) and loses it; a `steam_appid.txt` next to the exe stops the restart, for tests only. Patching the command line from the proxy (§4) is too late here: opengl32.dll loads only after FNA3D has chosen its driver.
 
+**Games that ship a second, OpenGL exe** (Dead Cells: `deadcells.exe` is D3D11, `deadcells_gl.exe` is OpenGL) restart through Steam the same way when you start the OpenGL exe yourself, and Steam starts the *default* exe, so the proxy next to it never loads and no log appears. Look in Steam's `appcache/appinfo.vdf` for the game's launch entries: the OpenGL exe is often one of them (here "Dead Cells (OpenGL - Legacy)", offered at [Play]). Tell the user to pick that entry; don't replace the default exe.
+
 ### 2.2 A forwarding shim for games that import no version.dll
 
 Build a DLL named after a non-KnownDLL the exe does import (`winmm.dll` is the usual candidate because of `timeGetTime`; `dsound.dll`, `dinput8.dll`, `dwmapi.dll` are others). It has two jobs:
