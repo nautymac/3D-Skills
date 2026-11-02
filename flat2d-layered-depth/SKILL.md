@@ -20,7 +20,7 @@ Related skills: `wrapper-injection` (getting an OpenGL wrapper into the game, in
 | Kind | What reaches the GPU | What to do |
 |---|---|---|
 | 1. 2.5D / 3D | Perspective cameras (`w != 1`) | Ordinary geometric stereo with auto-convergence. If you apply flat depth to it, the whole scene sticks to the far end as one sheet. (Snufkin looks 2D but has a perspective camera.) |
-| 2. Layer priority in z | Orthographic, but z encodes the layer (DS-style engines) | Drive the shift from clip z |
+| 2. Layer priority in z | Orthographic, but z encodes the layer (DS-style engines; Dead Cells draws its level front to back with a depth test) | Drive the shift from clip z. Under `order` such a game turns inside out: what is drawn first is in front |
 | 3. Separately drawn sprites | Many draws, each sprite or layer its own quad(s) | **This skill** |
 | 4. One finished picture | A few draws per frame; the scene was composed on the CPU (Blade Runner: Enhanced Edition draws 6 per frame), or the content is video (FRAMED's comic panels are WebM) | No layers exist. Use AI 2D→3D; a silhouette trick can lift dark figures (§7) |
 
@@ -152,6 +152,7 @@ The draw order is not the order on screen. Engines draw layers into off-screen t
 | One eye misses parts (`0x8cd7`) | Right-eye view of a non-immutable clone | Immutable clones, incl. multisample |
 | Unity 2D: both eyes identical | Lit sprites as composites + viewport per light pass | Lit-sprite rule + `screen_batch = 0` |
 | Whole scene stuck far away, near max separation | It is a 3D game (kind 1) | Flat depth off, auto-convergence on |
+| Terrain in front sits behind the back wall; depth in steps of a few screen pixels | Kind 2: tiles drawn front to back with a depth test, layers in clip z (the first draw already holds everything); steps from a low-resolution target | Flat depth off, shift by clip z in the vertex shader (before rasterizing, so no steps) (Dead Cells) |
 | Auto-convergence pulses several times a second on a scene of nearly one depth | At the right convergence the scene matches at offset 0, counts as 2D, and stray edges give a wrong near depth | Leave the convergence alone when most blocks are on the screen plane (`dynamic3d` §4.7) |
 | Few draws, none into the scene buffer | One finished picture (kind 4) | AI 2D→3D |
 | Black screen once the wrapper is in, also with stereo off; fine without it | The generated GS passes none of the outputs on: they are built-ins written through macros (MojoShader) | Scan the bodies of the macros the shader uses (§2) |
