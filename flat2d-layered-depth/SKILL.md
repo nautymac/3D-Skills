@@ -166,7 +166,7 @@ When the figures arrive already merged into one picture (video panels) and they 
 
 | Engine / genre | Start with | Notes |
 |---|---|---|
-| AGS (`acsetup.cfg` `driver=OGL`) | `rule = feet`, `screen_batch = 1` | Wide walk-behinds must stay sprites, so keep plane thresholds high |
+| AGS (`acsetup.cfg` `driver=OGL`) | `rule = feet`, `screen_batch = 1` | Wide walk-behinds must stay sprites, so keep plane thresholds high. Set `render_at_screenres=1` too: by default a low-resolution game (Resonance, 320x240 4:3) draws the room into a game-sized target, which is not the window's aspect (stays mono) and, made stereo, moves depth in whole game pixels (18 px steps on a 4K panel) |
 | Unity 2D (D3D11 via WineD3D) | `rule = order`, `group = draw`, `order_curve = 0.5`, `screen_batch = 0` | Read the API from the player log's `Version:` line. CSMT on. 2D lights need the lit-sprite rule; LUT strips need the strip rule |
 | Chowdren (Clickteam Fusion ports) | `order` | Scratch targets for text |
 | LÖVE (OpenGL) | `order` | Outputs starting with `_` |
